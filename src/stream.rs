@@ -71,7 +71,7 @@ impl FromStr for FCGIAddr {
     #[cfg(unix)]
     fn from_str(s: &str) -> Result<FCGIAddr, net::AddrParseError> {
         if s.starts_with("/") {
-            Ok(FCGIAddr::Unix(Path::new(s.trim_start_matches("/")).to_path_buf()))
+            Ok(FCGIAddr::Unix(Path::new(s).to_path_buf()))
         } else {
             s.parse().map(FCGIAddr::Inet)
         }
@@ -185,4 +185,73 @@ impl AsyncWrite for Stream {
         }
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::runtime::Runtime;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use std::net::SocketAddr;
+    use bytes::{BytesMut, Bytes};
+    use tokio::net::TcpListener;
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
+
+    #[test]
+    fn tcp_connect() {
+        let mut rt = Runtime::new().unwrap();
+        async fn mock_app(mut app_listener: TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            app_socket.write_buf(&mut buf.freeze()).await.unwrap();
+        }
+
+        async fn con() {
+            let a: SocketAddr = "127.0.0.1:59002".parse().unwrap();
+            let app_listener = TcpListener::bind(a).await.unwrap();
+            tokio::spawn(mock_app(app_listener));
+
+            let a: FCGIAddr = "127.0.0.1:59002".parse().expect("tcp parse failed");
+            let mut s = Stream::connect(&a).await.expect("tcp connect failed");
+
+            let data = b"1234";
+            s.write_buf(&mut Bytes::from(&data[..])).await.expect("tcp write failed");
+
+            let mut buf = BytesMut::with_capacity(4096);
+            s.read_buf(&mut buf).await.expect("tcp read failed");
+            assert_eq!(buf.to_bytes(), &data[..]);
+        }
+        rt.block_on(con());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn unix_connect() {
+        let mut rt = Runtime::new().unwrap();
+        async fn mock_app(mut app_listener: UnixListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            app_socket.write_buf(&mut buf.freeze()).await.unwrap();
+        }
+
+        async fn con() {
+            let a: &Path = Path::new("/tmp/afcgi.sock");
+            let app_listener = UnixListener::bind(a).unwrap();
+            tokio::spawn(mock_app(app_listener));
+
+            let a: FCGIAddr = "/tmp/afcgi.sock".parse().expect("unix parse failed");
+            println!("unix: {}", &a);
+            let mut s = Stream::connect(&a).await.expect("unix connect failed");
+
+            let data = b"1234";
+            s.write_buf(&mut Bytes::from(&data[..])).await.expect("unix write failed");
+
+            let mut buf = BytesMut::with_capacity(4096);
+            s.read_buf(&mut buf).await.expect("unix read failed");
+            assert_eq!(buf.to_bytes(), &data[..]);
+        }
+        rt.block_on(con());
+    }
 }
