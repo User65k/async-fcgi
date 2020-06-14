@@ -209,11 +209,11 @@ mod tests {
         }
 
         async fn con() {
-            let a: SocketAddr = "127.0.0.1:59002".parse().unwrap();
+            let a: SocketAddr = "127.0.0.1:59003".parse().unwrap();
             let app_listener = TcpListener::bind(a).await.unwrap();
             tokio::spawn(mock_app(app_listener));
 
-            let a: FCGIAddr = "127.0.0.1:59002".parse().expect("tcp parse failed");
+            let a: FCGIAddr = "127.0.0.1:59003".parse().expect("tcp parse failed");
             let mut s = Stream::connect(&a).await.expect("tcp connect failed");
 
             let data = b"1234";

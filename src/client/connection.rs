@@ -29,7 +29,7 @@ async fn main() {
 ```
 */
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
 use tokio::prelude::*;
 use std::marker::Unpin;
 use bytes::{BytesMut, Bytes, BufMut, Buf};
@@ -573,8 +573,8 @@ mod tests {
             let mut buf = BytesMut::with_capacity(4096);
             app_socket.read_buf(&mut buf).await.unwrap();
             trace!("app read {:?}", buf);
-            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0{\x05\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0b\x05SCRIPT_NAME/test\x0c\x05QUERY_STRINGlol=1\x0e\x03REQUEST_METHODGET\x0b\tHTTP_accepttext/html\x01\x04\0\x01\0\x01\x04\0\x01\0\0\0\0";
-            //assert_eq!(buf.to_bytes(), &to_php[..]);
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0i\x07\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\x05QUERY_STRINGlol=1\x0e\x03REQUEST_METHODGET\x0b\tHTTP_accepttext/html\x01\x04\0\x01\0i\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
+            assert_eq!(buf.to_bytes(), &to_php[..]);
             trace!("app answers on get");
             let from_php = b"\x01\x07\0\x01\0W\x01\0PHP Fatal error:  Kann nicht durch 0 teilen in /home/daniel/Public/test.php on line 14\n\0\x01\x06\0\x01\x01\xf7\x01\0Status: 404 Not Found\r\nX-Powered-By: PHP/7.3.16\r\nX-Authenticate: NTLM\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
             app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
@@ -585,7 +585,7 @@ mod tests {
             let app_listener = TcpListener::bind(a).await.unwrap();
             tokio::spawn(mock_app(app_listener));
 
-            let mut fcgi_con = Connection::connect(&"127.0.0.1:59000".parse().unwrap(), 1).await.unwrap();
+            let fcgi_con = Connection::connect(&"127.0.0.1:59000".parse().unwrap(), 1).await.unwrap();
             trace!("new connection obj");
             let b = TestBod{
                 l: VecDeque::new()
@@ -633,7 +633,7 @@ mod tests {
             let app_listener = TcpListener::bind(a).await.unwrap();
             tokio::spawn(mock_app(app_listener));
 
-            let mut fcgi_con = Connection::connect(&"127.0.0.1:59001".parse().unwrap(), 1).await.unwrap();
+            let fcgi_con = Connection::connect(&"127.0.0.1:59001".parse().unwrap(), 1).await.unwrap();
             trace!("new connection obj");
             let b = TestBod{
                 l: VecDeque::new()
@@ -670,7 +670,7 @@ mod tests {
             let app_listener = TcpListener::bind(a).await.unwrap();
             tokio::spawn(mock_app(app_listener));
 
-            let mut fcgi_con = Connection::connect(&"127.0.0.1:59002".parse().unwrap(), 1).await.unwrap();
+            let fcgi_con = Connection::connect(&"127.0.0.1:59002".parse().unwrap(), 1).await.unwrap();
             trace!("new connection obj");
             let b = TestBod{
                 l: VecDeque::new()

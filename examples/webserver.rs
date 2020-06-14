@@ -25,7 +25,7 @@ use http_body::Body as HTTPBody;
 use std::collections::HashMap;
 
 async fn fwd_to_fcgi(fcgi_app: Arc<Mutex<ConPool>>, req: Request<Body>) -> Result<Response<impl HTTPBody<Data = Bytes,Error = IoError>>, IoError> {
-    let mut fcg = fcgi_app.lock().await;
+    let fcg = fcgi_app.lock().await;
     let mut params = HashMap::new();
     params.insert(
         Bytes::from(&b"SCRIPT_NAME"[..]),
