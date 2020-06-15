@@ -11,8 +11,6 @@
 ```
 */
 use bytes::{Bytes, BytesMut, BufMut, Buf};
-use std::convert::From;
-//use std::convert::TryFrom;
 use crate::bufvec::BufList;
 use log::{debug};
 use std::iter::{FromIterator, Extend, IntoIterator};
@@ -22,7 +20,7 @@ use std::iter::{FromIterator, Extend, IntoIterator};
 struct Header
 {
     version: u8,
-    type_: u8,
+    rtype: u8,
     request_id: u16, // A request ID R becomes active when the application receives a record {FCGI_BEGIN_REQUEST, R, …} and becomes inactive when the application sends a record {FCGI_END_REQUEST, R, …} to the Web server. Management records have a requestId value of zero
     content_length: u16,
     padding_length: u8, // align by 8
@@ -42,14 +40,14 @@ pub struct EndRequestBody
 }
 pub struct UnknownTypeBody
 {
-    type_: u8,
+    rtype: u8,
 //    pub reserved: [u8; 7],
 }
 
 pub struct NameValuePair
 {
-    name_data: Bytes,
-    value_data: Bytes,
+    pub name_data: Bytes,
+    pub value_data: Bytes,
 }
 /// Body type for Params and GetValues.
 /// Holds multiple NameValuePair's
@@ -103,12 +101,12 @@ impl Header {
 
     /// version component of Header
     const VERSION_1: u8 = 1;
-
-    /// Default request id component of Header
-    pub const NULL_REQUEST_ID: u16 = 0;
 }
 
 impl Record {
+    /// Default request id component of Header
+    pub const MGMT_REQUEST_ID: u16 = 0;
+
     /// type component of Header
     /// # Request
     /// The Web server sends a FCGI_BEGIN_REQUEST record to start a request
@@ -153,13 +151,13 @@ impl Record {
     /// # Request
     /// The Web server can query specific variables within the application
     /// The application receives.
-    const GET_VALUES: u8 = 9;
+    pub const GET_VALUES: u8 = 9;
 
     /// type component of Header
     /// # Response
     /// The Web server can query specific variables within the application.
     /// The application responds.
-    const GET_VALUES_RESULT: u8 = 10;
+    pub const GET_VALUES_RESULT: u8 = 10;
 
     /// type component of Header
     ///
@@ -206,17 +204,17 @@ impl EndRequestBody {
 /// Names for GET_VALUES / GET_VALUES_RESULT records.
 ///
 /// The maximum number of concurrent transport connections this application will accept, e.g. "1" or "10".
-pub const MAX_CONNS: &'static str = "MAX_CONNS";
+pub const MAX_CONNS: &'static [u8] = b"MAX_CONNS";
 
 /// Names for GET_VALUES / GET_VALUES_RESULT records.
 ///
 /// The maximum number of concurrent requests this application will accept, e.g. "1" or "50".
-pub const MAX_REQS: &'static str = "MAX_REQS";
+pub const MAX_REQS: &'static [u8] = b"MAX_REQS";
 
 /// Names for GET_VALUES / GET_VALUES_RESULT records.
 ///
 /// If this application does not multiplex connections (i.e. handle concurrent requests over each connection), "1" otherwise.
-pub const MPXS_CONNS: &'static str = "MPXS_CONNS";
+pub const MPXS_CONNS: &'static [u8] = b"MPXS_CONNS";
 
 
 
@@ -226,7 +224,7 @@ impl NameValuePair
 {
     //pub name_data: Vec<u8>;
     //pub value_data: Vec<u8>;
-    pub fn parse(data: &Bytes) -> NameValuePair
+    pub fn parse(data: &mut Bytes) -> NameValuePair
     {
         let mut pos: usize = 0;
         let key_length = NameValuePair::param_length(data, &mut pos);
@@ -234,6 +232,8 @@ impl NameValuePair
         let key = data.slice(pos..pos + key_length);
         pos += key_length;
         let value = data.slice(pos..pos + value_length);
+        pos += value_length;
+        data.advance(pos);
         
         NameValuePair {
             name_data: key,
@@ -276,12 +276,6 @@ impl NameValuePair
     }
 }
 
-impl From<Bytes> for NameValuePair {
-    fn from(item: Bytes) -> Self {
-        NameValuePair::parse(&item)
-    }
-}
-
 impl STDINBody
 {
     /// create a single STDIN record from Bytes
@@ -301,14 +295,14 @@ impl STDINBody
 }
 
 impl Header {
-    pub fn new(type_:u8,request_id:u16,len:u16) -> Header {
+    pub fn new(rtype:u8,request_id:u16,len:u16) -> Header {
         let mut pad: u8 = (len%8) as u8;
         if pad !=0 {
             pad = 8 - pad;
         }
         Header {
             version: Header::VERSION_1,
-            type_,
+            rtype,
             request_id,
             content_length: len,
             padding_length: pad,
@@ -321,7 +315,7 @@ impl Header
     fn write_into(self, data: &mut BytesMut)
     {
         data.put_u8(self.version);
-        data.put_u8(self.type_);
+        data.put_u8(self.rtype);
         data.put_u16(self.request_id);
         data.put_u16(self.content_length);
         data.put_u8(self.padding_length);
@@ -332,7 +326,7 @@ impl Header
     {
         let h = Header {
             version: data.get_u8(),
-            type_: data.get_u8(),
+            rtype: data.get_u8(),
             request_id: data.get_u16(),
             content_length: data.get_u16(),
             padding_length: data.get_u8()
@@ -350,7 +344,7 @@ impl BeginRequestBody
         Record {
             header: Header {
                 version: Header::VERSION_1,
-                type_: Record::BEGIN_REQUEST,
+                rtype: Record::BEGIN_REQUEST,
                 request_id,
                 content_length: 8,
                 padding_length: 0,
@@ -381,20 +375,23 @@ impl Record
             return None;
         }
         data.advance(8);
-        debug!("read type {:?} payload: {:?}", header.type_, &data.slice(..len));
+        debug!("read type {:?} payload: {:?}", header.rtype, &data.slice(..len));
         let body = data.slice(0..header.content_length as usize);
         data.advance(len);
-        let body = match header.type_ {
+        let body = match header.rtype {
             Record::STDOUT => Body::StdOut(body),
             Record::STDERR => Body::StdErr(body),
             Record::END_REQUEST => Body::EndRequest(EndRequestBody::parse(body)),
             Record::UNKNOWN_TYPE => {
-                let type_ = data.get_u8();
+                let rtype = data.get_u8();
                 data.advance(7);
                 Body::UnknownType(UnknownTypeBody {
-                    type_
+                    rtype
                 })
             },
+            Record::GET_VALUES_RESULT => Body::GetValuesResult(NVBody::from_bytes(body)),
+            Record::GET_VALUES => Body::GetValues(NVBody::from_bytes(body)),
+            Record::PARAMS => Body::Params(NVBody::from_bytes(body)),            
             _ => panic!("not impl"),
         };
         Some(Record {
@@ -407,7 +404,7 @@ impl Record
         Record {
             header: Header {
                 version: Header::VERSION_1,
-                type_: Record::ABORT_REQUEST,
+                rtype: Record::ABORT_REQUEST,
                 request_id,
                 content_length: 0,
                 padding_length: 0,
@@ -472,7 +469,7 @@ impl NVBody
             len: 0
         }
     }
-    pub fn to_record(self, type_: u8, request_id: u16) -> Record {
+    pub fn to_record(self, rtype: u8, request_id: u16) -> Record {
         let mut pad: u8 = (self.len%8) as u8;
         if pad !=0 {
             pad = 8 - pad;
@@ -480,12 +477,12 @@ impl NVBody
         Record {
             header: Header {
                 version: Header::VERSION_1,
-                type_,
+                rtype,
                 request_id,
                 content_length: self.len,
                 padding_length: pad,
             },
-            body: match type_ {
+            body: match rtype {
                 Record::PARAMS => Body::Params(self),
                 Record::GET_VALUES => Body::GetValues(self),
                 Record::GET_VALUES_RESULT => Body::GetValuesResult(self),
@@ -543,7 +540,32 @@ impl NVBody
         }
         Ok(())
     }
+    pub(crate) fn from_bytes(buf: Bytes) -> NVBody {
+        let mut b = NVBody::new();
+        b.len = buf.remaining() as u16;
+        if b.len > 0 {
+            b.pairs.push(buf);
+        }
+        b
+    }
 }
+impl Iterator for NVBody {
+    type Item = NameValuePair;
+
+    /// might panic
+    fn next(&mut self) -> Option<NameValuePair> {
+        if !self.pairs.has_remaining() {
+            return None;
+        }
+        //TODO
+        Some(NameValuePair::parse(&mut self.pairs.to_bytes()))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (1, None)
+    }
+}
+
 impl NVBodyList{
     pub fn new() -> NVBodyList {
         NVBodyList{
@@ -561,9 +583,9 @@ impl NVBodyList{
         }
         nv.add(pair).expect("KVPair bigger that 0xFFFF");
     }
-    pub(crate) fn append_records(self, type_: u8, request_id: u16, wbuf: &mut BufList<Bytes>) {
+    pub(crate) fn append_records(self, rtype: u8, request_id: u16, wbuf: &mut BufList<Bytes>) {
         for nvbod in self.bodies {
-            nvbod.to_record(type_, request_id).append(wbuf);
+            nvbod.to_record(rtype, request_id).append(wbuf);
         }
     }
 }
