@@ -16,7 +16,7 @@ use log::{debug};
 use std::iter::{FromIterator, Extend, IntoIterator};
 
 /// FCGI record header
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Header
 {
     version: u8,
@@ -356,6 +356,73 @@ impl BeginRequestBody
         }
     }
 }
+/// to get a sream of records from a stream of bytes
+/// a record does not need to be completely available
+pub(crate) struct RecordReader {
+    current: Option<Header>
+}
+impl RecordReader
+{
+    pub(crate) fn new() -> RecordReader {
+        RecordReader {
+            current: None
+        }
+    }
+    pub(crate) fn read(&mut self, data: &mut Bytes) -> Option<Record>
+    { 
+        let mut full_header = match self.current.take() {
+            Some(h) => h,
+            None => {
+                //dont alter data until we have a whole header to read
+                if data.remaining() < 8 {
+                    return None;
+                }
+                debug!("new header");
+                Header::parse(data)
+            }
+        };
+        let mut body_len = full_header.content_length as usize;
+        let header = if data.remaining() < body_len {
+            let mut nh = full_header.clone();
+            body_len = data.remaining();
+            nh.content_length = body_len as u16;
+            nh.padding_length = 0;
+
+            //store rest for next time
+            full_header.content_length -= body_len as u16;
+            self.current = Some(full_header);
+            //we need to enforce a read if we are out of data
+            if body_len < 1 {
+                return None;
+            }
+            
+            debug!("more later, now:");
+            nh
+        }else{
+            full_header
+        };
+
+        debug!("read type {:?} payload: {:?}", header.rtype, &data.slice(..body_len));
+        let body = data.slice(0..body_len);
+        data.advance(body_len);
+
+        if data.remaining() < header.padding_length as usize {
+            //only possible if last/only fragment -> self.current is None
+            let mut nh = header.clone();
+            nh.content_length = 0;
+            self.current = Some(nh);
+            debug!("padding is still missing");
+        }else{
+            data.advance(header.padding_length as usize);
+        }
+
+        let body = Record::parse_body(body, header.rtype);
+        Some(Record {
+            header,
+            body
+        })
+    }
+}
 impl Record
 {
     pub(crate) fn get_request_id(&self) -> u16 {
@@ -378,26 +445,29 @@ impl Record
         debug!("read type {:?} payload: {:?}", header.rtype, &data.slice(..len));
         let body = data.slice(0..header.content_length as usize);
         data.advance(len);
-        let body = match header.rtype {
-            Record::STDOUT => Body::StdOut(body),
-            Record::STDERR => Body::StdErr(body),
-            Record::END_REQUEST => Body::EndRequest(EndRequestBody::parse(body)),
-            Record::UNKNOWN_TYPE => {
-                let rtype = data.get_u8();
-                data.advance(7);
-                Body::UnknownType(UnknownTypeBody {
-                    rtype
-                })
-            },
-            Record::GET_VALUES_RESULT => Body::GetValuesResult(NVBody::from_bytes(body)),
-            Record::GET_VALUES => Body::GetValues(NVBody::from_bytes(body)),
-            Record::PARAMS => Body::Params(NVBody::from_bytes(body)),            
-            _ => panic!("not impl"),
-        };
+        let body = Record::parse_body(body, header.rtype);
         Some(Record {
             header,
             body
         })
+    }
+    fn parse_body(mut payload: Bytes, ptype: u8) -> Body {
+        match ptype {
+            Record::STDOUT => Body::StdOut(payload),
+            Record::STDERR => Body::StdErr(payload),
+            Record::END_REQUEST => Body::EndRequest(EndRequestBody::parse(payload)),
+            Record::UNKNOWN_TYPE => {
+                let rtype = payload.get_u8();
+                payload.advance(7);
+                Body::UnknownType(UnknownTypeBody {
+                    rtype
+                })
+            },
+            Record::GET_VALUES_RESULT => Body::GetValuesResult(NVBody::from_bytes(payload)),
+            Record::GET_VALUES => Body::GetValues(NVBody::from_bytes(payload)),
+            Record::PARAMS => Body::Params(NVBody::from_bytes(payload)),            
+            _ => panic!("not impl"),
+        }
     }
     ///create a record of type ABORT_REQUEST
     pub(crate) fn abort(request_id: u16) -> Record {

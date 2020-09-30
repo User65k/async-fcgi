@@ -8,6 +8,12 @@ with focus on
 - async IO / tokio
 - easy [HTTP](https://crates.io/crates/http) interfaces
 
+Tested with:
+- Flup (Python)
+- PHP
+
+`cargo run --example webserver --features="con_pool"`
+
 # TODOs
 
 - [x] `Connection` should handle UnixStream and TCPStream transparently

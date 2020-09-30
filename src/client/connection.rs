@@ -85,7 +85,8 @@ struct InnerConnection
 {
     io: Stream,
     running_requests: Slab<FCGIRequest>,
-    buf: Option<Bytes>                     //half records
+    con_buf: Option<Bytes>,                     //half records
+    fcgi_parser: fastcgi::RecordReader
 }
 /// Single transport connection to a FCGI application
 /// 
@@ -103,7 +104,8 @@ impl Connection
             inner: Arc::new(Mutex::new(InnerConnection{
                 io: Stream::connect(addr).await?,
                 running_requests: Slab::with_capacity(max_req_per_con as  usize),
-                buf: None
+                con_buf: None,
+                fcgi_parser: fastcgi::RecordReader::new()
             })),
             sem: Arc::new(Semaphore::new(max_req_per_con as  usize))
         })
@@ -324,7 +326,8 @@ impl InnerConnection
         let Self {
             ref mut io,
             ref mut running_requests,
-            ref mut buf,
+            ref mut con_buf,
+            ref mut fcgi_parser,
         } = *self;
         /*
         1. Read from Socket
@@ -339,7 +342,7 @@ impl InnerConnection
             Poll::Ready(Ok(size)) => {
                 let mut data = rbuf.freeze().slice(..size);
                 trace!("read conn data {:?}", data);
-                if let Some(left) = buf.take() {
+                if let Some(left) = con_buf.take() {
                     //we have old data -> concat
                     let mut c = BytesMut::with_capacity(left.len()+data.len());
                     c.put(left);
@@ -347,11 +350,11 @@ impl InnerConnection
                     data = c.freeze();
                     trace!("data with leftover {:?}", data);
                 }
-                FCGIRequest::parse_and_distribute(&mut data, running_requests);
+                FCGIRequest::parse_and_distribute(&mut data, running_requests, fcgi_parser);
 
                 if data.remaining() > 0{
-                    //some data is left unparsed
-                    *buf = Some(data);
+                    //some data is left unparsed - had to be a header fragment (unlikely)
+                    *con_buf = Some(data);
                 }
                 Poll::Ready(Some(Ok(())))
             },
@@ -477,9 +480,9 @@ impl FCGIRequest {
             mpxs.done = true;
         }
     }
-    fn parse_and_distribute(data: &mut Bytes, running_requests: &mut Slab<FCGIRequest>) -> Option<Bytes> {
+    fn parse_and_distribute(data: &mut Bytes, running_requests: &mut Slab<FCGIRequest>, reader: &mut fastcgi::RecordReader) -> Option<Bytes> {
         //trace!("parse {:?}", &data);
-        while let Some(r) = fastcgi::Record::read(data) {
+        while let Some(r) = reader.read(data) {
                 let (req_no, ovr) = r.get_request_id().overflowing_sub(1);
                 if ovr {
                     //req id 0
