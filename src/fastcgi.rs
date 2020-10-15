@@ -408,10 +408,15 @@ impl RecordReader
 
         if data.remaining() < header.padding_length as usize {
             //only possible if last/only fragment -> self.current is None
+            if body_len < 1 {
+                //no data at all
+                self.current = Some(header);
+                return None;
+            }
             let mut nh = header.clone();
             nh.content_length = 0;
             self.current = Some(nh);
-            debug!("padding is still missing");
+            debug!("padding {} is still missing", header.padding_length);
         }else{
             data.advance(header.padding_length as usize);
         }
