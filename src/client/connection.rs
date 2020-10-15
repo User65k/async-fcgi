@@ -567,8 +567,6 @@ mod tests {
 
     #[test]
     fn simple_get() {
-        extern crate pretty_env_logger;
-        pretty_env_logger::init();
         // Create the runtime
         let mut rt = Runtime::new().unwrap();
         async fn mock_app(mut app_listener: TcpListener) {
@@ -619,6 +617,8 @@ mod tests {
     }
     #[test]
     fn app_answer_split_mid_record() { //flup did this once
+        extern crate pretty_env_logger;
+        pretty_env_logger::init();
         // Create the runtime
         let mut rt = Runtime::new().unwrap();
         async fn mock_app(mut app_listener: TcpListener) {
@@ -647,7 +647,13 @@ mod tests {
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
             let read1 = res.data().await;
-            assert!(read1.is_none());
+            assert!(read1.is_some());
+            let read1 = read1.unwrap();
+            assert!(read1.is_ok());
+            if let Ok(mut d) = read1 {
+                let body = b"Hello World!\n";
+                assert_eq!(d.to_bytes(), &body[..] );
+            }
         }
         rt.block_on(con());
     }
