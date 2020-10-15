@@ -12,6 +12,7 @@ with focus on
  - `con_pool`: [`ConPool`] to manage a set of Connections
  - `web_server`: [`Connection`] to easily resolv HTTPRequests to HTTPResponses
  - `application`: [`FCGICodec`] a tokio codec for FastCGI Servers / Applications
+ - `app_start`: [`ConPool`] gains prep_server methode to start an FCGI Application
 
 [`ConPool`]: ./client/con_pool/struct.ConPool.html
 [`Connection`]: ./client/connection/index.html
@@ -22,7 +23,7 @@ pub mod fastcgi;
 mod bufvec;
 
 #[cfg(feature = "web_server")]
-mod stream;
+pub mod stream;
 #[cfg(feature = "web_server")]
 pub use stream::FCGIAddr;
 

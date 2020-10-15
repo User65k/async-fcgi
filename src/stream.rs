@@ -4,9 +4,9 @@
  */
 
 use tokio::io::{AsyncRead, AsyncWrite, Error};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream,TcpListener};
 #[cfg(unix)]
-use tokio::net::UnixStream;
+use tokio::net::{UnixStream,UnixListener};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -19,6 +19,8 @@ use bytes::Buf;
 use std::path::{Path,PathBuf};
 #[cfg(unix)]
 use std::os::unix::net as unix;
+#[cfg(unix)]
+use std::os::unix::io::{RawFd,AsRawFd};
 
 #[derive(Debug,Clone,PartialEq,Eq,Hash)]
 pub enum FCGIAddr {
@@ -185,6 +187,37 @@ impl AsyncWrite for Stream {
         }
     }
 
+}
+pub enum Listener {
+    Inet(TcpListener),
+    #[cfg(unix)]
+    Unix(UnixListener)
+}
+impl Listener {
+    pub async fn bind(s: &FCGIAddr) -> io::Result<Listener> {
+        match s {
+            FCGIAddr::Inet(s) => TcpListener::bind(s).await.map(Listener::Inet),
+            #[cfg(unix)]
+            FCGIAddr::Unix(s) => UnixListener::bind(s).map(Listener::Unix)
+        }
+    }
+    pub async fn accept(&mut self) -> io::Result<(Stream, FCGIAddr)> {
+        match &mut *self {
+            Listener::Inet(s) => s.accept().await.map(|(s,a)|(Stream::Inet(s),FCGIAddr::Inet(a))),
+            #[cfg(unix)]
+            Listener::Unix(s) => s.accept().await.map(|(s,a)|(Stream::Unix(s),FCGIAddr::from(a)))
+        }
+    }
+}
+#[cfg(unix)]
+impl AsRawFd for Listener {
+    fn as_raw_fd(&self) -> RawFd {
+        match self {
+            Listener::Inet(s) => s.as_raw_fd(),
+            #[cfg(unix)]
+            Listener::Unix(s) => s.as_raw_fd()
+        }
+    }
 }
 
 #[cfg(test)]

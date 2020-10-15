@@ -22,7 +22,7 @@ Tested with:
 - [ ] `con_pool` should reconnect to the FCGI App if a connection is closed
 - [ ] `Connection` should handle overload error from FCGI app
 - [ ] Parsing for FCGI application/server side
-- [ ] Means to start an FCGI server (exec + env)
+- [x] Means to start an FCGI server (exec + env)
 - [ ] Support Key-Value Pairs bigger than maximum record size
 
 PullRequests are welcome BTW

@@ -26,8 +26,19 @@ use crate::bufvec::BufList;
 use std::iter::FromIterator;
 use std::collections::HashMap;
 use tokio::prelude::*;
-//use tokio::io::{AsyncRead, AsyncWrite};
-//use tokio::prelude::*;
+
+#[cfg(feature = "app_start")]
+use std::process::{Stdio, ExitStatus};
+#[cfg(feature = "app_start")]
+use tokio::process::Command;
+#[cfg(feature = "app_start")]
+use std::ffi::OsStr;
+#[cfg(feature = "app_start")]
+use std::path::Path;
+#[cfg(all(unix, feature = "app_start"))]
+use crate::stream::Listener;
+#[cfg(all(unix, feature = "app_start"))]
+use std::os::unix::io::{FromRawFd,AsRawFd};
 
 /// manage a pool of [Connection](../connection/struct.Connection.html)s to an Server.
 pub struct ConPool
@@ -147,32 +158,56 @@ async fn send_and_receive(stream: &mut Stream, wbuf: &mut BufList<Bytes>) -> Res
     Ok(recs)
 }
 
-/*
-#[test]
-fn it_works() {
-    extern crate pretty_env_logger;
-    pretty_env_logger::init();
+#[cfg(feature = "app_start")]
+impl ConPool
+{
+    pub async fn prep_server<S>(program: S, sock_addr: &FCGIAddr) -> Result<Command, IoError>
+        where S: AsRef<OsStr>,
+        {
+            // The Web server leaves a single file descriptor, FCGI_LISTENSOCK_FILENO, open when the application begins execution.
+            // This descriptor refers to a listening socket created by the Web server.
+            #[cfg(not(unix))]
+            let stdin = Stdio::null();
+            #[cfg(unix)]
+            let stdin = {
+                let l = Listener::bind(sock_addr).await?;
+                let fd = unsafe { Stdio::from_raw_fd(l.as_raw_fd()) };
+                std::mem::forget(l); // FCGI App closes this - at least php-cgi7.4 does it
+                fd
+            };
+
+            let mut command = Command::new(program);
+            command
+                .stdin(stdin) // FCGI_LISTENSOCK_FILENO equals STDIN_FILENO.
+                .stdout(Stdio::null()).stderr(Stdio::null())
+                ; // The standard descriptors STDOUT_FILENO and STDERR_FILENO are closed when the application begins execution.
+            Ok(command)
+        }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
     use tokio::runtime::Runtime;
-    // Create the runtime
-    let mut rt = Runtime::new().unwrap();
-    async fn app() {
-        let a = ConPool::new("127.0.0.1:9000").await;
-    
+
+    #[cfg(feature = "app_start")]
+    #[test]
+    fn start_app() {
+        let mut rt = Runtime::new().unwrap();
+        async fn spawn() {
+            let mut env = HashMap::new();
+            env.insert(
+                "PATH",
+                "/usr/bin",
+            );
+            let a: FCGIAddr = "/tmp/jo".parse().unwrap();
+            let s: ExitStatus = ConPool::prep_server("ls", &a).expect("prep_server error")
+                .args(&["-l", "-a"])
+                .env_clear().envs(env)
+                .status().await.expect("ls failed");
+            assert!(s.success())
+        }
+        rt.block_on(spawn());
     }
-    rt.block_on(app());
-}*/
-
-
-/*
-use std::process::{Stdio};
-use tokio::process::Command;
-
-let command = Command::new("ls").stdin(Stdio::null())
-        .arg("-l")
-        .arg("-a").env_clear()
-        .env("FCGI_WEB_SERVER_ADDRS", "199.170.183.28,199.170.183.71");
-
-
-
-
-*/
+}

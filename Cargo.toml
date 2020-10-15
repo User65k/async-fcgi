@@ -1,6 +1,6 @@
 [package]
 name = "async-fcgi"
-version = "0.1.1"
+version = "0.2.0"
 authors = ["User65k <15049544+User65k@users.noreply.github.com>"]
 edition = "2018"
 license = "AGPL-3.0"
@@ -35,9 +35,15 @@ default = []
 
 web_server = ["slab","http-body","httparse","tokio/tcp","tokio/uds","tokio/io-util","tokio/sync"]
 con_pool = ["web_server"]
-application = ["tokio-util/codec"]
+app_start = ["con_pool", "tokio/process"]
+#application = ["httparse","tokio/tcp","tokio/uds"]
 
 [[example]]
 name = "webserver"
 path = "examples/webserver.rs"
 required-features = ["con_pool","tokio/rt-core"]
+
+[[example]]
+name = "start_fcgi_server_from_client"
+path = "examples/start_fcgi_server_from_client.rs"
+required-features = ["app_start","tokio/rt-core"]
