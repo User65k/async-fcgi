@@ -19,7 +19,7 @@ Tested with:
 - [x] `Connection` should handle UnixStream and TCPStream transparently
 - [ ] `con_pool` should handle more than one connection :sweat_smile: and load balance
 - [ ] A dropped `FCGIBody` should not block a RequestID
-- [ ] `con_pool` should reconnect to the FCGI App if a connection is closed
+- [x] `Connection` should reconnect to the FCGI App if a connection is closed
 - [ ] `Connection` should handle overload error from FCGI app
 - [ ] Parsing for FCGI application/server side
 - [x] Means to start an FCGI server (exec + env)

@@ -37,11 +37,11 @@ use http::{Request, Response, StatusCode, header::HeaderMap, header::CONTENT_LEN
 use http_body::Body;
 use slab::Slab;
 
-use log::{trace, info, error, debug};
+use log::{trace, info, error, debug, warn, log_enabled, Level::Trace};
 
 use std::pin::Pin;
 use std::task::{Context, Poll};
-use std::io::Error as IoError;
+use std::io::{Error as IoError, ErrorKind};
 use std::error::Error;
 use std::task::Waker;
 use tokio::sync::{Mutex, Semaphore, OwnedSemaphorePermit};
@@ -117,6 +117,13 @@ impl Connection
         self.sem.available_permits() > 0
     }
 
+    pub async fn close(self) -> Result<(), IoError> {
+        let mut mut_inner = self.inner.lock().await;
+        mut_inner.io.shutdown().await?;
+        mut_inner.notify_everyone();
+        Ok(())
+    }
+
     /// Forwards an HTTP request to a FGCI Application
     ///
     /// Fills QUERY_STRING, REQUEST_METHOD, CONTENT_TYPE and CONTENT_LENGTH
@@ -163,6 +170,20 @@ impl Connection
             
             info!("wait for lock");
             let mut mut_inner = self.inner.lock().await;
+
+            use std::ops::DerefMut;
+            match mut_inner.deref_mut().await {
+                Some(res) => res?,
+                None => {
+                    // we need to connect again
+                    let addr = mut_inner.io.peer_addr()?;
+                    mut_inner.io.shutdown().await?;
+                    mut_inner.notify_everyone();
+                    mut_inner.io = Stream::connect(&addr).await?;
+                    info!("reconnected");
+                },
+            }
+
             rid = (mut_inner.running_requests.insert(meta)+1) as u16;
             info!("started req #{}", rid);
             //entry.insert(meta);
@@ -240,13 +261,15 @@ impl Connection
                 
                 if len > 0 {
                     //fix broken connection?
+                    error!("body to short. abort");
                     fastcgi::Record::abort(rid).append(&mut wbuf);
                 }
             }
-            fastcgi::STDINBody::new(1, &mut Bytes::new()).append(&mut wbuf); //empty record to end STDIN steam FCGI1.0
+            fastcgi::STDINBody::new(rid, &mut Bytes::new()).append(&mut wbuf); //empty record to end STDIN steam FCGI1.0
             mut_inner.io.write_buf(&mut wbuf).await?;
-            trace!("sent req body");
+            debug!("sent req body");
         }
+        //free mutex
 
         let mut fcgibody = FCGIBody
         {
@@ -304,7 +327,7 @@ impl Connection
             }
         }
         fcgibody.was_returned = true;
-        trace!("resp header parsing done");
+        debug!("resp header parsing done");
         
         match rb.status(status).body(fcgibody) {
             Ok(v) => Ok(v),
@@ -315,9 +338,21 @@ impl Connection
         }
     }
 }
+
+impl Future for InnerConnection {
+    type Output = Option<Result<(), IoError>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<Option<Result<(), IoError>>>
+    {
+        self.poll_resp(cx)
+    }
+}
 impl InnerConnection
 {
-    /// Read, parse and distribute data from the socket
+    /// drive this connection
+    /// Read, parse and distribute data from the socket.
+    /// return None if the connection was closed
     fn poll_resp(
         mut self: Pin<&mut Self>, 
         cx: &mut Context
@@ -338,10 +373,17 @@ impl InnerConnection
         let mut rbuf = BytesMut::with_capacity(4096);
 
         match Pin::new(io).poll_read_buf(cx, &mut rbuf) {
-            Poll::Ready(Ok(0)) => {info!("connection closed");FCGIRequest::notify_everyone(running_requests);Poll::Ready(None)},
+            Poll::Ready(Ok(0)) => {info!("connection closed");self.notify_everyone();Poll::Ready(None)},
             Poll::Ready(Ok(size)) => {
                 let mut data = rbuf.freeze().slice(..size);
-                trace!("read conn data {:?}", data);
+                if log_enabled!(Trace) {
+                    let print = if data.len() > 50 {
+                        format!("read conn data ({}) {:?}...{:?}", data.len(), data.slice(..21), data.slice(data.len()-21..))
+                    }else{
+                        format!("read conn data {:?}", data)
+                    };
+                    trace!("read conn data {}", print);
+                }
                 if let Some(left) = con_buf.take() {
                     //we have old data -> concat
                     let mut c = BytesMut::with_capacity(left.len()+data.len());
@@ -350,7 +392,7 @@ impl InnerConnection
                     data = c.freeze();
                     trace!("data with leftover {:?}", data);
                 }
-                FCGIRequest::parse_and_distribute(&mut data, running_requests, fcgi_parser);
+                InnerConnection::parse_and_distribute(&mut data, running_requests, fcgi_parser);
 
                 if data.remaining() > 0{
                     //some data is left unparsed - had to be a header fragment (unlikely)
@@ -358,7 +400,7 @@ impl InnerConnection
                 }
                 Poll::Ready(Some(Ok(())))
             },
-            Poll::Ready(Err(e)) => {error!("Err {}",e);FCGIRequest::notify_everyone(running_requests);Poll::Ready(Some(Err(e)))},
+            Poll::Ready(Err(e)) => {error!("Err {}",e);self.notify_everyone();Poll::Ready(Some(Err(e)))},
             Poll::Pending => Poll::Pending,
         }
     }
@@ -368,7 +410,7 @@ impl Drop for FCGIBody {
         if self.done {
             return;
         }
-        trace!("Dropping FCGIBody!");
+        debug!("Dropping FCGIBody #{}!", self.rid);
         match self.con.try_lock() {
             Ok(mut mut_inner) => {
                 let rid = self.rid as usize;
@@ -407,7 +449,7 @@ impl Body for FCGIBody
         } = *self;
         
         if *done {
-            trace!("looks done");
+            debug!("body #{} is already done", rid);
             return Poll::Ready(None);
         }
 
@@ -420,18 +462,19 @@ impl Body for FCGIBody
                 match Pin::new(&mut *mut_inner).poll_resp(cx) {
                     Poll::Ready(Some(Ok(_))) | Poll::Ready(None) | Poll::Pending => {
                         if !mut_inner.running_requests.contains(rid as usize) {
-                            trace!("not in slab");
+                            trace!("#{} not in slab", rid);
                             *done = true;
                             return Poll::Ready(None);
                         }
                         let mut slab = &mut mut_inner.running_requests[rid as usize];
 
                         if slab.buf.remaining() >= 1 {
-                            trace!("body has data and is {} closed", slab.done);
+                            trace!("body #{} has data and is {} closed", rid, slab.done);
                             let retdata = Poll::Ready(Some(Ok(slab.buf.oldest().unwrap())));
                             if was_returned && slab.done && slab.buf.remaining() < 1 {
                                 //ret rid of this as fast as possible,
                                 //it blocks us and clients might stop reading
+                                trace!("next read on #{} will not have data -> release", rid);
                                 mut_inner.running_requests.remove(rid as usize);
                                 *done = true;
                             }
@@ -439,12 +482,12 @@ impl Body for FCGIBody
                         }else{
                             let req_done = slab.done;
                             if req_done {
-                                trace!("body is done");
+                                debug!("body #{} is done", rid);
                                 if was_returned {
                                     mut_inner.running_requests.remove(rid as usize);
                                     *done = true;
                                 }else{
-                                    debug!("closed before handover");
+                                    warn!("#{} closed before handover", rid);
                                 }
                                 Poll::Ready(None)
                             }else{
@@ -457,7 +500,7 @@ impl Body for FCGIBody
                     },
                     //Poll::Pending => Poll::Pending,
                     //Poll::Ready(None) => Poll::Ready(None),
-                    Poll::Ready(Some(Err(e))) => {error!("body err {}",e);Poll::Ready(Some(Err(e)))},
+                    Poll::Ready(Some(Err(e))) => {error!("body #{} err {}", rid, e);Poll::Ready(Some(Err(e)))},
                 }
             }
         }
@@ -471,29 +514,36 @@ impl Body for FCGIBody
     }
 }
 
-impl FCGIRequest {
-    fn notify_everyone(running_requests: &mut Slab<FCGIRequest>) {
-        for (_, mpxs) in running_requests.iter_mut() {
+impl InnerConnection {
+    fn notify_everyone(&mut self) {
+        for (_, mpxs) in self.running_requests.iter_mut() {
             if let Some(waker) = mpxs.waker.take() {
                 waker.wake()
             }
             mpxs.done = true;
         }
     }
-    fn parse_and_distribute(data: &mut Bytes, running_requests: &mut Slab<FCGIRequest>, reader: &mut fastcgi::RecordReader) -> Option<Bytes> {
+    fn parse_and_distribute(data: &mut Bytes, running_requests: &mut Slab<FCGIRequest>, fcgi_parser: &mut fastcgi::RecordReader) -> Option<Bytes> {
         //trace!("parse {:?}", &data);
-        while let Some(r) = reader.read(data) {
+        while let Some(r) = fcgi_parser.read(data) {
                 let (req_no, ovr) = r.get_request_id().overflowing_sub(1);
                 if ovr {
                     //req id 0
                     error!("got mgmt record");
                     continue;
                 }
-                trace!("record for #{}", req_no);
+                debug!("record for #{}", req_no);
                 if let Some(mpxs) = running_requests.get_mut(req_no as usize) {
                     match r.body {
                         fastcgi::Body::StdOut(s) => {
-                            trace!("FCGI stdout: {:?}", s.slice(..));
+                            if log_enabled!(Trace) {
+                                let print = if s.len() > 50 {
+                                    format!("FCGI stdout: ({}) {:?}...{:?}", s.len(), s.slice(..21), s.slice(s.len()-21..))
+                                }else{
+                                    format!("FCGI stdout: {:?}", s)
+                                };
+                                trace!("FCGI stdout: {}", print);
+                            }                            
                             if s.has_remaining() {
                                 mpxs.buf.push(s);
                                 if let Some(waker) = mpxs.waker.take() {
@@ -514,7 +564,7 @@ impl FCGIRequest {
                                 waker.wake()
                             }
                         },
-                        _ => {trace!("type?");}
+                        _ => {warn!("type?");}
                     }
                 }else{
                     debug!("not a pending red ID");

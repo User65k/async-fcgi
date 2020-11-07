@@ -12,7 +12,7 @@
 */
 use bytes::{Bytes, BytesMut, BufMut, Buf};
 use crate::bufvec::BufList;
-use log::{debug};
+use log::{debug, trace};
 use std::iter::{FromIterator, Extend, IntoIterator};
 
 /// FCGI record header
@@ -368,6 +368,8 @@ impl RecordReader
             current: None
         }
     }
+    /// try to read a Record
+    /// if only a part of a record is available, it is returned looking like a full record
     pub(crate) fn read(&mut self, data: &mut Bytes) -> Option<Record>
     { 
         let mut full_header = match self.current.take() {
@@ -402,7 +404,8 @@ impl RecordReader
             full_header
         };
 
-        debug!("read type {:?} payload: {:?}", header.rtype, &data.slice(..body_len));
+        debug!("read type {}", header.rtype);
+        trace!("payload: {:?}", &data.slice(..body_len));
         let body = data.slice(0..body_len);
         data.advance(body_len);
 
@@ -447,7 +450,8 @@ impl Record
             return None;
         }
         data.advance(8);
-        debug!("read type {:?} payload: {:?}", header.rtype, &data.slice(..len));
+        debug!("read type {}", header.rtype);
+        trace!("payload: {:?}", &data.slice(..len));
         let body = data.slice(0..header.content_length as usize);
         data.advance(len);
         let body = Record::parse_body(body, header.rtype);

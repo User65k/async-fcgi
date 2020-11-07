@@ -28,13 +28,11 @@ use std::collections::HashMap;
 use tokio::prelude::*;
 
 #[cfg(feature = "app_start")]
-use std::process::{Stdio, ExitStatus};
+use std::process::Stdio;
 #[cfg(feature = "app_start")]
 use tokio::process::Command;
 #[cfg(feature = "app_start")]
 use std::ffi::OsStr;
-#[cfg(feature = "app_start")]
-use std::path::Path;
 #[cfg(all(unix, feature = "app_start"))]
 use crate::stream::Listener;
 #[cfg(all(unix, feature = "app_start"))]
@@ -161,6 +159,15 @@ async fn send_and_receive(stream: &mut Stream, wbuf: &mut BufList<Bytes>) -> Res
 #[cfg(feature = "app_start")]
 impl ConPool
 {
+    /// Constructs a new `Command` for launching the program at
+    /// path `program`, with the following default configuration:
+    ///
+    /// * No arguments to the program
+    /// * Inherit the current process's environment
+    /// * Inherit the current process's working directory
+    /// * stdout/stderr is /dev/null
+    /// * stdin is a listening socket at `sock_addr`
+    ///
     pub async fn prep_server<S>(program: S, sock_addr: &FCGIAddr) -> Result<Command, IoError>
         where S: AsRef<OsStr>,
         {
