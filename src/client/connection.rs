@@ -171,17 +171,13 @@ impl Connection
             info!("wait for lock");
             let mut mut_inner = self.inner.lock().await;
 
-            use std::ops::DerefMut;
-            match mut_inner.deref_mut().await {
-                Some(res) => res?,
-                None => {
-                    // we need to connect again
-                    let addr = mut_inner.io.peer_addr()?;
-                    mut_inner.io.shutdown().await?;
-                    mut_inner.notify_everyone();
-                    mut_inner.io = Stream::connect(&addr).await?;
-                    info!("reconnected");
-                },
+            if mut_inner.check_alive().await?==false {
+                // we need to connect again
+                let addr = mut_inner.io.peer_addr()?;
+                mut_inner.io.shutdown().await?;
+                mut_inner.notify_everyone();
+                mut_inner.io = Stream::connect(&addr).await?;
+                info!("reconnected");
             }
 
             rid = (mut_inner.running_requests.insert(meta)+1) as u16;
@@ -348,8 +344,29 @@ impl Future for InnerConnection {
         self.poll_resp(cx)
     }
 }
+struct CheckAlive<'a>(&'a mut InnerConnection);
+
+impl<'a> Future for CheckAlive<'a> {
+    type Output = Result<bool, IoError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>)
+        -> Poll<Result<bool, IoError>>
+    {
+        Poll::Ready(match Pin::new(&mut *self.0).poll_resp(cx) {
+            Poll::Ready(None) => Ok(false),
+            Poll::Ready(Some(Err(e))) => Err(e),
+            _ => Ok(true)
+        })
+    }
+}
+
+
 impl InnerConnection
 {
+    ///returns true if the connection is still alive
+    fn check_alive(&mut self) -> CheckAlive {
+        CheckAlive(self)
+    }
     /// drive this connection
     /// Read, parse and distribute data from the socket.
     /// return None if the connection was closed
