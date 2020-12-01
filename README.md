@@ -1,3 +1,8 @@
+[![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
+[![crates.io](https://meritbadge.herokuapp.com/async-fcgi)](https://crates.io/crates/async-fcgi)
+[![Released API docs](https://docs.rs/async-fcgi/badge.svg)](https://docs.rs/async-fcgi)
+[![GitHub](https://img.shields.io/github/license/User65k/async-fcgi)](./LICENSE)
+
 FastCGI implementation in pure Rust.
 
 The focus is on the webserver/client side, but the application/server side could be added in the future.
