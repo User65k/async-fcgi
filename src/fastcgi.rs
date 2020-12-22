@@ -368,8 +368,6 @@ impl RecordReader
             current: None
         }
     }
-    /// try to read a Record
-    /// if only a part of a record is available, it is returned looking like a full record
     pub(crate) fn read(&mut self, data: &mut Bytes) -> Option<Record>
     { 
         let mut full_header = match self.current.take() {
@@ -627,17 +625,21 @@ impl NVBody
         }
         b
     }
+    pub fn drain(mut self) -> NVDrain {
+        NVDrain(self.pairs.to_bytes())
+    }
 }
-impl Iterator for NVBody {
+pub struct NVDrain(Bytes);
+
+impl Iterator for NVDrain {
     type Item = NameValuePair;
 
     /// might panic
     fn next(&mut self) -> Option<NameValuePair> {
-        if !self.pairs.has_remaining() {
+        if !self.0.has_remaining() {
             return None;
         }
-        //TODO
-        Some(NameValuePair::parse(&mut self.pairs.to_bytes()))
+        Some(NameValuePair::parse(&mut self.0))
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -713,6 +715,12 @@ impl EndRequestBody
     }
 }
 
+
+impl std::fmt::Debug for NameValuePair {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?} = {:?}", self.name_data, self.value_data)
+    }
+}
 
 #[test]
 fn encode_simple_get() {

@@ -240,6 +240,8 @@ impl Connection
             trace!("sent header");
             //Note: Responses might arrive from this point on
 
+            // FIXME stdin after end!!!!!!!
+
             //send the body to the FCGI App
             if let Some(value) = len {
                 //CGI1.1 4.2 -> at least content-length data
@@ -432,6 +434,11 @@ impl InnerConnection
             Poll::Ready(Err(e)) => {error!("Err {}",e);self.notify_everyone();Poll::Ready(Some(Err(e)))},
             Poll::Pending => Poll::Pending,
         }
+    }
+}
+impl Drop for FCGIRequest {
+    fn drop(&mut self) {
+        debug!("Req mplex id free");
     }
 }
 impl Drop for FCGIBody {
@@ -675,7 +682,7 @@ mod tests {
         async fn con() {
             let a: SocketAddr = "127.0.0.1:59000".parse().unwrap();
             let app_listener = TcpListener::bind(a).await.unwrap();
-            tokio::spawn(mock_app(app_listener));
+            let m = tokio::spawn(mock_app(app_listener));
 
             let fcgi_con = Connection::connect(&"127.0.0.1:59000".parse().unwrap(), 1).await.unwrap();
             trace!("new connection obj");
@@ -703,13 +710,12 @@ mod tests {
             }
             let read2 = res.data().await;
             assert!(read2.is_none());
+            m.await.unwrap();
         }
         rt.block_on(con());
     }
     #[test]
     fn app_answer_split_mid_record() { //flup did this once
-        extern crate pretty_env_logger;
-        pretty_env_logger::init();
         // Create the runtime
         let mut rt = Runtime::new().unwrap();
         async fn mock_app(mut app_listener: TcpListener) {
@@ -725,7 +731,7 @@ mod tests {
         async fn con() {            
             let a: SocketAddr = "127.0.0.1:59001".parse().unwrap();
             let app_listener = TcpListener::bind(a).await.unwrap();
-            tokio::spawn(mock_app(app_listener));
+            let m = tokio::spawn(mock_app(app_listener));
 
             let fcgi_con = Connection::connect(&"127.0.0.1:59001".parse().unwrap(), 1).await.unwrap();
             trace!("new connection obj");
@@ -745,6 +751,7 @@ mod tests {
                 let body = b"Hello World!\n";
                 assert_eq!(d.to_bytes(), &body[..] );
             }
+            m.await.unwrap();
         }
         rt.block_on(con());
     }
@@ -768,7 +775,7 @@ mod tests {
         async fn con() {
             let a: SocketAddr = "127.0.0.1:59002".parse().unwrap();
             let app_listener = TcpListener::bind(a).await.unwrap();
-            tokio::spawn(mock_app(app_listener));
+            let m = tokio::spawn(mock_app(app_listener));
 
             let fcgi_con = Connection::connect(&"127.0.0.1:59002".parse().unwrap(), 1).await.unwrap();
             trace!("new connection obj");
@@ -786,6 +793,7 @@ mod tests {
 
             let read1 = res.data().await;
             assert!(read1.is_none());
+            m.await.unwrap();
         }
         rt.block_on(con());
     }

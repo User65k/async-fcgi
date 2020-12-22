@@ -12,7 +12,7 @@
 */
 
 use http::{Request, Response};
-use log::info;
+use log::{trace, info};
 use crate::client::connection::Connection;
 use std::error::Error;
 use std::io::Error as IoError;
@@ -51,7 +51,6 @@ impl ConPool
     pub async fn new(sock_addr: &FCGIAddr) -> Result<ConPool, Box<dyn Error>> {
         // query VALUES from connection
         let mut stream = Stream::connect(sock_addr).await?;
-
         let mut query = HashMap::new();
         query.insert(
             Bytes::from(MAX_CONNS),
@@ -72,7 +71,7 @@ impl ConPool
         let mut max_req_per_con = 1;
         for rec in send_and_receive(&mut stream, &mut wbuf).await? {
             if let Body::GetValuesResult(kvs) = rec.body {
-                for kv in kvs {
+                for kv in kvs.drain() {
                     match kv.name_data.bytes() {
                         MAX_CONNS => {
                             if let Some(v) = parse_int::<u8>(kv.value_data) {
@@ -136,12 +135,16 @@ fn parse_int<I: std::str::FromStr>(bytes: Bytes) -> Option<I> {
 
 /// Note: only use this if there are no requests pending
 async fn send_and_receive(stream: &mut Stream, wbuf: &mut BufList<Bytes>) -> Result<Vec<Record>, IoError> {
-    stream.write_buf(wbuf).await?;
+    let mut wbuf = wbuf.to_bytes();
+    trace!("sent {:?}", wbuf);
+    stream.write_buf(&mut wbuf).await?;
     let mut recs = Vec::new();
 
+    trace!("prep 4 read");
     let mut rbuf = BytesMut::with_capacity(4096);
     loop {
         stream.read_buf(&mut rbuf).await?;
+        trace!("got {:?}", rbuf);
         let mut pbuf = rbuf.freeze();
         while let Some(r) = Record::read(&mut pbuf) {
             recs.push(r);
@@ -159,15 +162,6 @@ async fn send_and_receive(stream: &mut Stream, wbuf: &mut BufList<Bytes>) -> Res
 #[cfg(feature = "app_start")]
 impl ConPool
 {
-    /// Constructs a new `Command` for launching the program at
-    /// path `program`, with the following default configuration:
-    ///
-    /// * No arguments to the program
-    /// * Inherit the current process's environment
-    /// * Inherit the current process's working directory
-    /// * stdout/stderr is /dev/null
-    /// * stdin is a listening socket at `sock_addr`
-    ///
     pub async fn prep_server<S>(program: S, sock_addr: &FCGIAddr) -> Result<Command, IoError>
         where S: AsRef<OsStr>,
         {
@@ -186,8 +180,8 @@ impl ConPool
             let mut command = Command::new(program);
             command
                 .stdin(stdin) // FCGI_LISTENSOCK_FILENO equals STDIN_FILENO.
-                .stdout(Stdio::null()).stderr(Stdio::null())
-                ; // The standard descriptors STDOUT_FILENO and STDERR_FILENO are closed when the application begins execution.
+                //.stdout(Stdio::null()).stderr(Stdio::null()) // The standard descriptors STDOUT_FILENO and STDERR_FILENO are closed when the application begins execution.
+                ;
             Ok(command)
         }
 }
@@ -197,6 +191,7 @@ impl ConPool
 mod tests {
     use super::*;
     use tokio::runtime::Runtime;
+    use std::process::ExitStatus;
 
     #[cfg(feature = "app_start")]
     #[test]
@@ -209,12 +204,69 @@ mod tests {
                 "/usr/bin",
             );
             let a: FCGIAddr = "/tmp/jo".parse().unwrap();
-            let s: ExitStatus = ConPool::prep_server("ls", &a).expect("prep_server error")
+            let s: ExitStatus = ConPool::prep_server("ls", &a).await.expect("prep_server error")
                 .args(&["-l", "-a"])
                 .env_clear().envs(env)
                 .status().await.expect("ls failed");
             assert!(s.success())
         }
         rt.block_on(spawn());
+        std::fs::remove_file("/tmp/jo").unwrap();
     }
+    #[test]
+    fn no_vals() {
+        //extern crate pretty_env_logger;
+        //pretty_env_logger::init();
+        use tokio::net::TcpListener;
+        use std::net::SocketAddr;
+        // Create the runtime
+        let mut rt = Runtime::new().unwrap();
+        async fn mock_app(mut app_listener: TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            info!("accepted");
+            
+            //app_socket.read_buf(&mut buf).await.unwrap();
+            if let Err(e) = app_socket.read_buf(&mut buf).await {
+                info!("{}", e);
+                panic!("could not read");
+            }
+
+            let mut buf = buf.freeze();
+            trace!("app read {:?}", buf);
+            let rec = Record::read(&mut buf).unwrap();
+            assert_eq!(rec.get_request_id(), 0);
+            let v = match rec.body {
+                Body::GetValues(v) => v,
+                _ => panic!("wrong body"),
+            };            
+            let names = Vec::from_iter(v.drain());
+            
+            assert_eq!(names.len(),3);
+            assert!(!buf.has_remaining());
+
+            trace!("app answers on get");
+            let from_php = b"\x01\x0a\0\0\0!\x07\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\0MAX_CONNS\0\0\0\0\0\0\0";
+            app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
+
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            info!("accepted2");
+        }
+
+        async fn con() {
+            let a: SocketAddr = "127.0.0.1:59876".parse().unwrap();
+            let app_listener = TcpListener::bind(a).await.unwrap();
+            info!("bound");
+            let m = tokio::spawn(async move {
+                let a = a.into();
+                let cp = ConPool::new(&a).await.unwrap();
+                assert_eq!(cp.max_cons,1);
+                assert_eq!(cp.max_req_per_con,1);
+            });
+            mock_app(app_listener).await;
+            m.await.unwrap();
+        }
+        rt.block_on(con());
+    }
+
 }
