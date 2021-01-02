@@ -280,16 +280,14 @@ impl STDINBody
 {
     /// create a single STDIN record from Bytes
     /// remaining bytes might be left if the record is full
-    pub fn new(request_id: u16, b: &mut Bytes) -> Record
+    pub fn new(request_id: u16, b: &mut dyn Buf) -> Record
     {
-        let mut size = b.remaining();
-        if size > Body::MAX_LENGTH {
-            size = Body::MAX_LENGTH;
-        }
+        let mut rec_data = b.take(Body::MAX_LENGTH);
+        let len = rec_data.remaining();
 
         Record {
-            header: Header::new(Record::STDIN, request_id, size as u16),
-            body: Body::StdIn(b.slice(..size))
+            header: Header::new(Record::STDIN, request_id, len as u16),
+            body: Body::StdIn(rec_data.copy_to_bytes(len))
         }
     }
 }
@@ -626,7 +624,7 @@ impl NVBody
         b
     }
     pub fn drain(mut self) -> NVDrain {
-        NVDrain(self.pairs.to_bytes())
+        NVDrain(self.pairs.copy_to_bytes(self.len as usize))
     }
 }
 pub struct NVDrain(Bytes);
@@ -731,7 +729,10 @@ fn encode_simple_get() {
     nv.to_record(Record::PARAMS, 1).append(&mut b);
     NVBody::new().to_record(Record::PARAMS, 1).append(&mut b);
 
-    assert_eq!(b.to_bytes(),
+    let mut dst = [0; 80];
+    b.copy_to_slice(&mut dst);
+
+    assert_eq!(dst,
      &b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0-\x03\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x01\x04\0\x01\x04\0\x01\0\0\0\0"[..]
     );
 }
@@ -746,6 +747,8 @@ fn encode_post() {
     STDINBody::new(1, &mut Bytes::from(&b"a=b"[..])).append(&mut b);
     STDINBody::new(1, &mut Bytes::new()).append(&mut b);
 
-    assert_eq!(b.to_bytes(),
+    let mut dst = [0; 104];
+    b.copy_to_slice(&mut dst);
+    assert_eq!(dst,
      &b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0-\x03\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x01\x04\0\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\x03\x05\0a=b\x01\x05\0\x01\0\x01\x05\0\x01\0\0\0\0"[..]);
 }

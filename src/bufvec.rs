@@ -1,6 +1,4 @@
 use std::collections::VecDeque;
-use std::io::IoSlice;
-use log::{info};
 use bytes::Buf;
 
 pub(crate) struct BufList<T> {
@@ -41,16 +39,14 @@ impl<T: Buf> Buf for BufList<T> {
     }
 
     #[inline]
-    fn bytes(&self) -> &[u8] {
-        info!("bytes");
-        self.bufs.front().map(Buf::bytes).unwrap_or_default()
+    fn chunk(&self) -> &[u8] {
+        self.bufs.front().map(Buf::chunk).unwrap_or_default()
     }
 
     #[inline]
     fn advance(&mut self, mut cnt: usize) {
         while cnt > 0 {
-            {
-                let front = &mut self.bufs[0];
+            if let Some(front) = &mut self.bufs.front_mut() {
                 let rem = front.remaining();
                 if rem > cnt {
                     front.advance(cnt);
@@ -59,24 +55,12 @@ impl<T: Buf> Buf for BufList<T> {
                     front.advance(rem);
                     cnt -= rem;
                 }
+            }else{
+                //no data -> panic?
+                return;
             }
             self.bufs.pop_front();
         }
     }
 
-    #[inline]
-    fn bytes_vectored<'t>(&'t self, dst: &mut [IoSlice<'t>]) -> usize {
-        info!("vec");
-        if dst.is_empty() {
-            return 0;
-        }
-        let mut vecs = 0;
-        for buf in &self.bufs {
-            vecs += buf.bytes_vectored(&mut dst[vecs..]);
-            if vecs == dst.len() {
-                break;
-            }
-        }
-        vecs
-    }
 }

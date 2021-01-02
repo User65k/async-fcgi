@@ -16,9 +16,9 @@
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Server};
 use async_fcgi::client::con_pool::ConPool;
-use bytes::{BytesMut, Bytes};
+use bytes::{BytesMut, Bytes, BufMut};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::{runtime::Builder, sync::Mutex};
 use std::io::Error as IoError;
 use http::Response;
 use http_body::Body as HTTPBody;
@@ -26,10 +26,15 @@ use std::collections::HashMap;
 
 async fn fwd_to_fcgi(fcgi_app: Arc<Mutex<ConPool>>, req: Request<Body>) -> Result<Response<impl HTTPBody<Data = Bytes,Error = IoError>>, IoError> {
     let fcg = fcgi_app.lock().await;
+
+    let mut file_path = BytesMut::from(&b"."[..]);
+    file_path.put(req.uri().path().as_bytes());
+    let file_path = file_path.freeze();
+
     let mut params = HashMap::new();
     params.insert(
         Bytes::from(&b"SCRIPT_NAME"[..]),
-        BytesMut::from(req.uri().path().as_bytes()).freeze(),
+        file_path.clone(),
     );
     params.insert(
         Bytes::from(&b"SERVER_NAME"[..]),
@@ -43,14 +48,17 @@ async fn fwd_to_fcgi(fcgi_app: Arc<Mutex<ConPool>>, req: Request<Body>) -> Resul
         Bytes::from(&b"SERVER_PROTOCOL"[..]),
         Bytes::from(&b"HTTP"[..]),
     );
-    fcg.forward(req, params).await
+    params.insert( // PHP cares for this
+        Bytes::from(&b"SCRIPT_FILENAME"[..]),
+        file_path,
+    );
+    fcg.forward(req, params).await.map_err(|e| {eprintln!("{}", e);e})
 }
 
-#[tokio::main]
-async fn main() {
+async fn amain() {
     pretty_env_logger::init();
     
-    match ConPool::new(&"127.0.0.1:9000".parse().unwrap()).await {
+    match ConPool::new(&"127.0.0.1:9001".parse().unwrap()).await {
         Ok(fcgi_app) => {
             let fcgi_link = Arc::new(Mutex::new(fcgi_app));
             let make_service = make_service_fn(move |_|{
@@ -71,4 +79,8 @@ async fn main() {
             eprintln!("FCGI error: {}", e);
         }
     }
+}
+fn main() {
+    let rt = Builder::new_current_thread().enable_all().build().unwrap();
+    rt.block_on(amain());
 }

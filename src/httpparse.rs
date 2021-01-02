@@ -23,7 +23,7 @@ pub (crate) fn parse(mut bytes: Bytes, header_map: &mut HeaderMap) -> ParseResul
     let mut headers_indices: [HeaderIndices; MAX_HEADERS] = unsafe { mem::uninitialized() };
     let mut headers: [httparse::Header<'_>; MAX_HEADERS] = unsafe { mem::uninitialized() };
     //let mut bytes = BytesMut::from(&buf[..]);
-    let buf = bytes.bytes();
+    let buf = bytes.chunk();
     
     if let Ok(pr) = parse_headers(buf, &mut headers){
         match pr {

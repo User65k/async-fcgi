@@ -28,9 +28,6 @@ async fn main() {
 }
 ```
 */
-
-use tokio::io::AsyncRead;
-use tokio::prelude::*;
 use std::marker::Unpin;
 use bytes::{BytesMut, Bytes, BufMut, Buf};
 use http::{Request, Response, StatusCode, header::HeaderMap, header::CONTENT_LENGTH, header::AUTHORIZATION, header::CONTENT_TYPE};
@@ -54,6 +51,7 @@ use crate::stream::{FCGIAddr, Stream};
 use crate::bufvec::BufList;
 use crate::fastcgi;
 use crate::httpparse::{parse, ParseResult};
+use tokio::io::{AsyncWriteExt, BufReader, AsyncBufRead};
 
 /// [http_body](https://docs.rs/http-body/0.3.1/http_body/trait.Body.html) type for FCGI.
 /// 
@@ -83,9 +81,8 @@ struct FCGIRequest
 /// Manages all requests on it and distributes data to them
 struct InnerConnection
 {
-    io: Stream,
+    io: BufReader<Stream>,
     running_requests: Slab<FCGIRequest>,
-    con_buf: Option<Bytes>,                     //half records
     fcgi_parser: fastcgi::RecordReader
 }
 /// Single transport connection to a FCGI application
@@ -103,9 +100,8 @@ impl Connection
     pub async fn connect(addr: &FCGIAddr, max_req_per_con: u16) -> Result<Connection, Box<dyn Error>> {
         Ok(Connection {
             inner: Arc::new(Mutex::new(InnerConnection{
-                io: Stream::connect(addr).await?,
+                io: BufReader::new(Stream::connect(addr).await?),
                 running_requests: Slab::with_capacity(max_req_per_con as  usize),
-                con_buf: None,
                 fcgi_parser: fastcgi::RecordReader::new()
             })),
             sem: Arc::new(Semaphore::new(max_req_per_con as  usize)),
@@ -162,7 +158,7 @@ impl Connection
         let rid: u16;
         {
             info!("new request pending");
-            let _permit = self.sem.clone().acquire_owned().await;
+            let _permit = self.sem.clone().acquire_owned().await.map_err(|_e|IoError::new(ErrorKind::WouldBlock,""))?;
             let meta = FCGIRequest {
                 buf: BufList::new(),
                 waker: None,
@@ -180,7 +176,7 @@ impl Connection
                     error!("shutdown old con: {}", e);
                 }
                 mut_inner.notify_everyone();
-                mut_inner.io = Stream::connect(&self.addr).await?;
+                mut_inner.io = BufReader::new(Stream::connect(&self.addr).await?);
                 mut_inner.fcgi_parser = fastcgi::RecordReader::new();
                 info!("reconnected");
             }
@@ -236,7 +232,9 @@ impl Connection
             nv.append_records(fastcgi::Record::PARAMS, rid, &mut wbuf);
             fastcgi::NVBody::new().to_record(fastcgi::Record::PARAMS, rid).append(&mut wbuf); //empty record to end PARAMS steam FCGI1.0
             //send all headers to the FCGI App
-            mut_inner.io.write_buf(&mut wbuf).await?;
+            while wbuf.has_remaining() {
+                mut_inner.io.write_buf(&mut wbuf).await?;
+            }
             trace!("sent header");
             //Note: Responses might arrive from this point on
 
@@ -253,12 +251,14 @@ impl Connection
                 let mut body: B = req.into_body();
                 while let Some(buf) = body.data().await {
                     if let Ok(mut b) = buf { //b: Buf
-                        let mut b = b.to_bytes();
+                        let mut b = b.copy_to_bytes(b.remaining());
                         len = len.saturating_sub(b.len());
                         while b.remaining() > 0 {
                             fastcgi::STDINBody::new(rid, &mut b).append(&mut wbuf);
                         }
-                        mut_inner.io.write_buf(&mut wbuf).await?;
+                        while wbuf.has_remaining() {
+                            mut_inner.io.write_buf(&mut wbuf).await?;
+                        }
                     }
                 }
                 
@@ -269,7 +269,9 @@ impl Connection
                 }
             }
             fastcgi::STDINBody::new(rid, &mut Bytes::new()).append(&mut wbuf); //empty record to end STDIN steam FCGI1.0
-            mut_inner.io.write_buf(&mut wbuf).await?;
+            while wbuf.has_remaining() {
+                mut_inner.io.write_buf(&mut wbuf).await?;
+            }
             debug!("sent req body");
         }
         //free mutex
@@ -392,7 +394,6 @@ impl InnerConnection
         let Self {
             ref mut io,
             ref mut running_requests,
-            ref mut con_buf,
             ref mut fcgi_parser,
         } = *self;
         /*
@@ -400,39 +401,36 @@ impl InnerConnection
         2. Parse all the Data and put it in the corresponding OutBuffer
         3. Notify those with new Data
         */
-
-        let mut rbuf = BytesMut::with_capacity(4096);
-
-        match Pin::new(io).poll_read_buf(cx, &mut rbuf) {
-            Poll::Ready(Ok(0)) => {info!("connection closed");self.notify_everyone();Poll::Ready(None)},
-            Poll::Ready(Ok(size)) => {
-                let mut data = rbuf.freeze().slice(..size);
-                if log_enabled!(Trace) {
-                    let print = if data.len() > 50 {
-                        format!("({}) {:?}...{:?}", data.len(), data.slice(..21), data.slice(data.len()-21..))
-                    }else{
-                        format!("{:?}", data)
-                    };
-                    trace!("read conn data {}", print);
+        let read = match Pin::new(io).poll_fill_buf(cx) {
+            Poll::Ready(Ok(rbuf)) => {
+                let data_available = rbuf.len();
+                if data_available==0 {
+                    info!("connection closed");
+                    0
+                }else{
+                    let mut data = Bytes::copy_from_slice(rbuf);
+                    if log_enabled!(Trace) {
+                        let print = if data.len() > 50 {
+                            format!("({}) {:?}...{:?}", data.len(), data.slice(..21), data.slice(data.len()-21..))
+                        }else{
+                            format!("{:?}", data)
+                        };
+                        trace!("read conn data {}", print);
+                    }
+                    InnerConnection::parse_and_distribute(&mut data, running_requests, fcgi_parser);
+                    let read = data_available - data.remaining();
+                    read
                 }
-                if let Some(left) = con_buf.take() {
-                    //we have old data -> concat
-                    let mut c = BytesMut::with_capacity(left.len()+data.len());
-                    c.put(left);
-                    c.put(data);
-                    data = c.freeze();
-                    trace!("data with leftover {:?}", data);
-                }
-                InnerConnection::parse_and_distribute(&mut data, running_requests, fcgi_parser);
-
-                if data.remaining() > 0{
-                    //some data is left unparsed - had to be a header fragment (unlikely)
-                    *con_buf = Some(data);
-                }
-                Poll::Ready(Some(Ok(())))
             },
-            Poll::Ready(Err(e)) => {error!("Err {}",e);self.notify_everyone();Poll::Ready(Some(Err(e)))},
-            Poll::Pending => Poll::Pending,
+            Poll::Ready(Err(e)) => {error!("Err {}",e);self.notify_everyone();return Poll::Ready(Some(Err(e)))},
+            Poll::Pending => return Poll::Pending,
+        };
+        if read == 0 {
+            self.notify_everyone();
+            Poll::Ready(None)
+        }else{
+            Pin::new(&mut (*self).io).consume(read);
+            Poll::Ready(Some(Ok(())))
         }
     }
 }
@@ -496,7 +494,7 @@ impl Body for FCGIBody
             Poll::Ready(mut mut_inner) => {  // mut_inner: InnerConnection<S>
 
                 //poll connection and distribute new data
-                let con_stat = Pin::new(&mut *mut_inner).poll_resp(cx);
+                let _con_stat = Pin::new(&mut *mut_inner).poll_resp(cx);
 
                 //work with slab buffer
                 let slab = match mut_inner.running_requests.get_mut(rid as usize) {
@@ -625,9 +623,7 @@ impl InnerConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-        //extern crate pretty_env_logger;
-        //pretty_env_logger::init();
-    use tokio::runtime::Runtime;
+    use tokio::{io::AsyncReadExt, runtime::Builder};
     use tokio::net::TcpListener;
     use std::collections::{VecDeque,HashMap};
     use std::net::SocketAddr;
@@ -665,15 +661,17 @@ mod tests {
 
     #[test]
     fn simple_get() {
-        // Create the runtime
-        let mut rt = Runtime::new().unwrap();
-        async fn mock_app(mut app_listener: TcpListener) {
+        extern crate pretty_env_logger;
+        pretty_env_logger::init();
+            // Create the runtime
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             let mut buf = BytesMut::with_capacity(4096);
             app_socket.read_buf(&mut buf).await.unwrap();
             trace!("app read {:?}", buf);
             let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0i\x07\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\x05QUERY_STRINGlol=1\x0e\x03REQUEST_METHODGET\x0b\tHTTP_accepttext/html\x01\x04\0\x01\0i\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
-            assert_eq!(buf.to_bytes(), &to_php[..]);
+            assert_eq!(buf, &to_php[..]);//FIXME b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0i\x07\0"
             trace!("app answers on get");
             let from_php = b"\x01\x07\0\x01\0W\x01\0PHP Fatal error:  Kann nicht durch 0 teilen in /home/daniel/Public/test.php on line 14\n\0\x01\x06\0\x01\x01\xf7\x01\0Status: 404 Not Found\r\nX-Powered-By: PHP/7.3.16\r\nX-Authenticate: NTLM\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
             app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
@@ -698,15 +696,15 @@ mod tests {
             );
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
-            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);//FIXME 200
             assert_eq!(res.headers().get("X-Powered-By").expect("powered by header missing"), "PHP/7.3.16");
             let read1 = res.data().await;
             assert!(read1.is_some());
             let read1 = read1.unwrap();
             assert!(read1.is_ok());
-            if let Ok(mut d) = read1 {
+            if let Ok(d) = read1 {
                 let body = b"<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n";
-                assert_eq!(d.to_bytes(), &body[..] );
+                assert_eq!(d, &body[..] );
             }
             let read2 = res.data().await;
             assert!(read2.is_none());
@@ -717,8 +715,8 @@ mod tests {
     #[test]
     fn app_answer_split_mid_record() { //flup did this once
         // Create the runtime
-        let mut rt = Runtime::new().unwrap();
-        async fn mock_app(mut app_listener: TcpListener) {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             let mut buf = BytesMut::with_capacity(4096);
             app_socket.read_buf(&mut buf).await.unwrap();
@@ -747,9 +745,9 @@ mod tests {
             assert!(read1.is_some());
             let read1 = read1.unwrap();
             assert!(read1.is_ok());
-            if let Ok(mut d) = read1 {
+            if let Ok(d) = read1 {
                 let body = b"Hello World!\n";
-                assert_eq!(d.to_bytes(), &body[..] );
+                assert_eq!(d, &body[..] );
             }
             m.await.unwrap();
         }
@@ -759,8 +757,8 @@ mod tests {
     #[test]
     fn app_http_headers_split() {
         // Create the runtime
-        let mut rt = Runtime::new().unwrap();
-        async fn mock_app(mut app_listener: TcpListener) {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             let mut buf = BytesMut::with_capacity(4096);
             app_socket.read_buf(&mut buf).await.unwrap();

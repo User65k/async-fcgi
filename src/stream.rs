@@ -3,7 +3,7 @@
  * 
  */
 
-use tokio::io::{AsyncRead, AsyncWrite, Error};
+use tokio::io::{AsyncRead, AsyncWrite, Error, ReadBuf};
 use tokio::net::{TcpStream,TcpListener};
 #[cfg(unix)]
 use tokio::net::{UnixStream,UnixListener};
@@ -14,7 +14,6 @@ use std::net;
 use std::fmt;
 use std::str::FromStr;
 use std::io;
-use bytes::Buf;
 #[cfg(unix)]
 use std::path::{Path,PathBuf};
 #[cfg(unix)]
@@ -56,6 +55,16 @@ impl From<unix::SocketAddr> for FCGIAddr {
         })
     }
 }
+#[cfg(unix)]
+impl From<tokio::net::unix::SocketAddr> for FCGIAddr {
+    fn from(s: tokio::net::unix::SocketAddr) -> FCGIAddr {
+        FCGIAddr::Unix(match s.as_pathname() {
+            None => Path::new("unnamed").to_path_buf(),
+            Some(p) => p.to_path_buf()
+        })
+    }
+}
+
 
 impl fmt::Display for FCGIAddr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -134,8 +143,8 @@ impl AsyncRead for Stream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
-        buf: &mut [u8]
-    ) -> Poll<Result<usize, Error>> {
+        buf: &mut ReadBuf<'_>
+    ) -> Poll<Result<(), Error>> {
         match &mut *self {
             Stream::Inet(s) => Pin::new(s).as_mut().poll_read(cx, buf),
             #[cfg(unix)]
@@ -175,18 +184,6 @@ impl AsyncWrite for Stream {
             Stream::Unix(s) => Pin::new(s).as_mut().poll_shutdown(cx)
         }
     }
-    fn poll_write_buf<B: Buf>(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut B,
-    ) -> Poll<io::Result<usize>> {
-        match &mut *self {
-            Stream::Inet(s) => Pin::new(s).as_mut().poll_write_buf(cx, buf),
-            #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).as_mut().poll_write_buf(cx, buf)
-        }
-    }
-
 }
 pub enum Listener {
     Inet(TcpListener),
@@ -219,11 +216,23 @@ impl AsRawFd for Listener {
         }
     }
 }
+#[cfg(unix)]
+impl Drop for Listener {
+    fn drop(&mut self) {
+        if let Listener::Unix(l) = self {
+            if let Ok(a) = l.local_addr() {
+                if let Some(path) = a.as_pathname() {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::runtime::Runtime;
+    use tokio::runtime::Builder;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use std::net::SocketAddr;
     use bytes::{BytesMut, Bytes};
@@ -233,8 +242,8 @@ mod tests {
 
     #[test]
     fn tcp_connect() {
-        let mut rt = Runtime::new().unwrap();
-        async fn mock_app(mut app_listener: TcpListener) {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             let mut buf = BytesMut::with_capacity(4096);
             app_socket.read_buf(&mut buf).await.unwrap();
@@ -254,15 +263,15 @@ mod tests {
 
             let mut buf = BytesMut::with_capacity(4096);
             s.read_buf(&mut buf).await.expect("tcp read failed");
-            assert_eq!(buf.to_bytes(), &data[..]);
+            assert_eq!(buf, &data[..]);
         }
         rt.block_on(con());
     }
     #[cfg(unix)]
     #[test]
     fn unix_connect() {
-        let mut rt = Runtime::new().unwrap();
-        async fn mock_app(mut app_listener: UnixListener) {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: UnixListener) {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             let mut buf = BytesMut::with_capacity(4096);
             app_socket.read_buf(&mut buf).await.unwrap();
@@ -283,8 +292,9 @@ mod tests {
 
             let mut buf = BytesMut::with_capacity(4096);
             s.read_buf(&mut buf).await.expect("unix read failed");
-            assert_eq!(buf.to_bytes(), &data[..]);
+            assert_eq!(buf, &data[..]);
         }
         rt.block_on(con());
+        std::fs::remove_file("/tmp/afcgi.sock").unwrap();
     }
 }

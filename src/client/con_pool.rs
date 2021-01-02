@@ -25,7 +25,7 @@ use crate::fastcgi::{NVBodyList, Record, Body, MAX_CONNS, MAX_REQS, MPXS_CONNS};
 use crate::bufvec::BufList;
 use std::iter::FromIterator;
 use std::collections::HashMap;
-use tokio::prelude::*;
+use tokio::io::{AsyncReadExt,AsyncWriteExt};
 
 #[cfg(feature = "app_start")]
 use std::process::Stdio;
@@ -72,7 +72,7 @@ impl ConPool
         for rec in send_and_receive(&mut stream, &mut wbuf).await? {
             if let Body::GetValuesResult(kvs) = rec.body {
                 for kv in kvs.drain() {
-                    match kv.name_data.bytes() {
+                    match kv.name_data.chunk() {
                         MAX_CONNS => {
                             if let Some(v) = parse_int::<u8>(kv.value_data) {
                                 max_cons = v;
@@ -125,7 +125,7 @@ impl fmt::Debug for ConPool {
 }
 
 fn parse_int<I: std::str::FromStr>(bytes: Bytes) -> Option<I> {
-    if let Ok(s) = std::str::from_utf8(bytes.bytes()) {
+    if let Ok(s) = std::str::from_utf8(bytes.chunk()) {
         if let Ok(i) = s.parse() {
             return Some(i);
         }
@@ -135,9 +135,9 @@ fn parse_int<I: std::str::FromStr>(bytes: Bytes) -> Option<I> {
 
 /// Note: only use this if there are no requests pending
 async fn send_and_receive(stream: &mut Stream, wbuf: &mut BufList<Bytes>) -> Result<Vec<Record>, IoError> {
-    let mut wbuf = wbuf.to_bytes();
-    trace!("sent {:?}", wbuf);
-    stream.write_buf(&mut wbuf).await?;
+    while wbuf.has_remaining() {
+        stream.write_buf(wbuf).await?;
+    }
     let mut recs = Vec::new();
 
     trace!("prep 4 read");
@@ -190,13 +190,13 @@ impl ConPool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::runtime::Runtime;
+    use tokio::runtime::Builder;
     use std::process::ExitStatus;
 
     #[cfg(feature = "app_start")]
     #[test]
     fn start_app() {
-        let mut rt = Runtime::new().unwrap();
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
         async fn spawn() {
             let mut env = HashMap::new();
             env.insert(
@@ -220,8 +220,8 @@ mod tests {
         use tokio::net::TcpListener;
         use std::net::SocketAddr;
         // Create the runtime
-        let mut rt = Runtime::new().unwrap();
-        async fn mock_app(mut app_listener: TcpListener) {
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
             let (mut app_socket, _) = app_listener.accept().await.unwrap();
             let mut buf = BytesMut::with_capacity(4096);
             info!("accepted");
@@ -234,7 +234,7 @@ mod tests {
 
             let mut buf = buf.freeze();
             trace!("app read {:?}", buf);
-            let rec = Record::read(&mut buf).unwrap();
+            let rec = Record::read(&mut buf).unwrap(); //FIXME
             assert_eq!(rec.get_request_id(), 0);
             let v = match rec.body {
                 Body::GetValues(v) => v,
@@ -249,7 +249,7 @@ mod tests {
             let from_php = b"\x01\x0a\0\0\0!\x07\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\0MAX_CONNS\0\0\0\0\0\0\0";
             app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
 
-            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let _ = app_listener.accept().await.unwrap();
             info!("accepted2");
         }
 
