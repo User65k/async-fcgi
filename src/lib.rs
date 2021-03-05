@@ -36,3 +36,5 @@ mod httpparse;
 #[cfg(feature = "application")]
 pub mod server;
 
+#[cfg(feature = "codec")]
+pub mod codec;

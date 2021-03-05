@@ -17,7 +17,7 @@ use std::iter::{FromIterator, Extend, IntoIterator};
 
 /// FCGI record header
 #[derive(Debug, Clone)]
-struct Header
+pub(crate) struct Header
 {
     version: u8,
     rtype: u8,
@@ -97,7 +97,7 @@ impl Header {
         /// Number of bytes in a Header.
     ///
     /// Future versions of the protocol will not reduce this number.
-    const HEADER_LEN: usize = 8;
+    pub const HEADER_LEN: usize = 8;
 
     /// version component of Header
     const VERSION_1: u8 = 1;
@@ -110,17 +110,17 @@ impl Record {
     /// type component of Header
     /// # Request
     /// The Web server sends a FCGI_BEGIN_REQUEST record to start a request
-    const BEGIN_REQUEST: u8 = 1;
+    pub const BEGIN_REQUEST: u8 = 1;
 
     /// type component of Header
     /// # Request
     /// A Web server aborts a FastCGI request when an HTTP client closes its transport connection while the FastCGI request is running on behalf of that client
-    const ABORT_REQUEST: u8 = 2;
+    pub const ABORT_REQUEST: u8 = 2;
 
     /// type component of Header
     /// # Response
     /// The application sends a FCGI_END_REQUEST record to terminate a request
-    const END_REQUEST: u8 = 3;
+    pub const END_REQUEST: u8 = 3;
 
     /// type component of Header
     /// # Request
@@ -130,22 +130,22 @@ impl Record {
     /// type component of Header
     /// # Request
     /// Byte Stream
-    const STDIN: u8 = 5;
+    pub const STDIN: u8 = 5;
 
     /// type component of Header
     /// # Response
     /// Byte Stream
-    const STDOUT: u8 = 6;
+    pub const STDOUT: u8 = 6;
 
     /// type component of Header
     /// # Response
     /// Byte Stream
-    const STDERR: u8 = 7;
+    pub const STDERR: u8 = 7;
 
     /// type component of Header
     /// # Request
     /// Byte Stream
-    const DATA: u8 = 8;
+    pub const DATA: u8 = 8;
 
     /// type component of Header
     /// # Request
@@ -262,7 +262,7 @@ impl NameValuePair
 
         length
     }
-    fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         let ln = self.name_data.len();
         let lv = self.value_data.len();
         let mut lf: usize = ln+lv+2;
@@ -306,11 +306,7 @@ impl Header {
             padding_length: pad,
         }
     }
-}
-
-impl Header
-{
-    fn write_into(self, data: &mut BytesMut)
+    pub fn write_into<BM: BufMut>(self, data: &mut BM)
     {
         data.put_u8(self.version);
         data.put_u8(self.rtype);
@@ -318,7 +314,7 @@ impl Header
         data.put_u16(self.content_length);
         data.put_u8(self.padding_length);
         data.put_u8(0); // reserved
-        debug!("h {} {} -> {:?}",self.request_id, self.content_length, &data);
+        //debug!("h {} {} -> {:?}",self.request_id, self.content_length, &data);
     }
     fn parse(data: &mut Bytes) -> Header
     {
@@ -331,6 +327,11 @@ impl Header
         };
         data.advance(1); // reserved
         h
+    }
+    #[inline]
+    pub fn get_padding(&self) -> u8
+    {
+        self.padding_length
     }
 }
 
@@ -690,7 +691,7 @@ impl Extend<(Bytes, Bytes)> for NVBodyList
 
 impl BeginRequestBody
 {
-    fn write_into(self, data: &mut BytesMut)
+    pub fn write_into(self, data: &mut BytesMut)
     {
         data.put_u16(self.role);
         data.put_u8(self.flags);

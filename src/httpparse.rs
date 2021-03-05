@@ -27,10 +27,10 @@ pub (crate) fn parse(mut bytes: Bytes, header_map: &mut HeaderMap) -> ParseResul
     
     if let Ok(pr) = parse_headers(buf, &mut headers){
         match pr {
-            httparse::Status::Complete(len) => {
-                let headers_len = len.1.len();
-                record_header_indices(buf, &len.1, &mut headers_indices);
-                let slice = bytes.split_to(len.0);
+            httparse::Status::Complete((pos, headers)) => {
+                let headers_len = headers.len();
+                record_header_indices(buf, &headers, &mut headers_indices);
+                let slice = bytes.split_to(pos);
 
                 for header in &headers_indices[..headers_len] {
                     let name = HeaderName::from_bytes(&slice[header.name.0..header.name.1]).expect("header name validated by httparse");

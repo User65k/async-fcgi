@@ -44,14 +44,15 @@ use std::task::Waker;
 use tokio::sync::{Mutex, Semaphore, OwnedSemaphorePermit};
 use std::sync::Arc;
 use std::future::Future;
-use std::iter::{Extend, IntoIterator};
+use std::iter::{IntoIterator};
 use std::ops::Drop;
 
 use crate::stream::{FCGIAddr, Stream};
 use crate::bufvec::BufList;
 use crate::fastcgi;
 use crate::httpparse::{parse, ParseResult};
-use tokio::io::{AsyncWriteExt, BufReader, AsyncBufRead};
+use crate::codec::{FCGIWriter, FCGIType};
+use tokio::io::{BufReader, AsyncBufRead};
 
 /// [http_body](https://docs.rs/http-body/0.3.1/http_body/trait.Body.html) type for FCGI.
 /// 
@@ -81,7 +82,7 @@ struct FCGIRequest
 /// Manages all requests on it and distributes data to them
 struct InnerConnection
 {
-    io: BufReader<Stream>,
+    io: FCGIWriter<BufReader<Stream>>,
     running_requests: Slab<FCGIRequest>,
     fcgi_parser: fastcgi::RecordReader
 }
@@ -100,7 +101,7 @@ impl Connection
     pub async fn connect(addr: &FCGIAddr, max_req_per_con: u16) -> Result<Connection, Box<dyn Error>> {
         Ok(Connection {
             inner: Arc::new(Mutex::new(InnerConnection{
-                io: BufReader::new(Stream::connect(addr).await?),
+                io: FCGIWriter::new(BufReader::new(Stream::connect(addr).await?)),
                 running_requests: Slab::with_capacity(max_req_per_con as  usize),
                 fcgi_parser: fastcgi::RecordReader::new()
             })),
@@ -176,7 +177,7 @@ impl Connection
                     error!("shutdown old con: {}", e);
                 }
                 mut_inner.notify_everyone();
-                mut_inner.io = BufReader::new(Stream::connect(&self.addr).await?);
+                mut_inner.io = FCGIWriter::new(BufReader::new(Stream::connect(&self.addr).await?));
                 mut_inner.fcgi_parser = fastcgi::RecordReader::new();
                 info!("reconnected");
             }
@@ -185,36 +186,39 @@ impl Connection
             info!("started req #{}", rid);
             //entry.insert(meta);
 
-
+            let br = FCGIType::BeginRequest{
+                request_id: rid,
+                role: fastcgi::BeginRequestBody::RESPONDER,
+                flags: fastcgi::BeginRequestBody::KEEP_CONN
+            };
+            mut_inner.io.encode(br).await?;
             //Prepare the CGI headers
-            let mut wbuf = BufList::new();
-            fastcgi::BeginRequestBody::new(fastcgi::BeginRequestBody::RESPONDER,
-                                           fastcgi::BeginRequestBody::KEEP_CONN,
-                                           rid).append(&mut wbuf);
-            let mut nv = fastcgi::NVBodyList::new();
-            nv.extend(dyn_headers);
+            let mut kvw = mut_inner.io.kv_stream(rid,
+                fastcgi::Record::PARAMS);
+    
+            kvw.extend(dyn_headers).await?;
 
             let query = match req.uri().query() {
                 Some(query) => BytesMut::from(query.as_bytes()).freeze(),
                 None => Bytes::new()
             };
-            nv.add(fastcgi::NameValuePair::new(Bytes::from(&b"QUERY_STRING"[..]),query)); //must CGI1.1 4.1.7
+            kvw.add(fastcgi::NameValuePair::new(Bytes::from(&b"QUERY_STRING"[..]),query)).await?; //must CGI1.1 4.1.7
         
             let method = BytesMut::from(req.method().as_str().as_bytes()).freeze();
-            nv.add(fastcgi::NameValuePair::new(Bytes::from(&b"REQUEST_METHOD"[..]),method)); //must CGI1.1 4.1.12
+            kvw.add(fastcgi::NameValuePair::new(Bytes::from(&b"REQUEST_METHOD"[..]),method)).await?; //must CGI1.1 4.1.12
             
             if let Some(value) = req.headers().get(CONTENT_TYPE) { //if client CGI1.1 4.1.3.
-                nv.add(fastcgi::NameValuePair::new(
+                kvw.add(fastcgi::NameValuePair::new(
                         BytesMut::from(CONTENT_TYPE.as_str().as_bytes()).freeze(),
                         BytesMut::from(value.as_bytes()).freeze()
-                    ));
+                    )).await?;
             }
             let len = req.headers().get(CONTENT_LENGTH); //if body CGI1.1 4.1.2.
             if let Some(value) = len {
-                nv.add(fastcgi::NameValuePair::new(
+                kvw.add(fastcgi::NameValuePair::new(
                         BytesMut::from(CONTENT_LENGTH.as_str().as_bytes()).freeze(),
                         BytesMut::from(value.as_bytes()).freeze()
-                    ));
+                    )).await?;
             }
             let skip = [AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE];
             //append all HTTP headers
@@ -227,14 +231,11 @@ impl Connection
                 k.put(key.as_str().as_bytes()); //FIXME copy
                 let v = BytesMut::from(value.as_bytes()).freeze();
                 let p = fastcgi::NameValuePair::new(k.freeze(),v);
-                nv.add(p);
+                kvw.add(p).await?;
             }
-            nv.append_records(fastcgi::Record::PARAMS, rid, &mut wbuf);
-            fastcgi::NVBody::new().to_record(fastcgi::Record::PARAMS, rid).append(&mut wbuf); //empty record to end PARAMS steam FCGI1.0
             //send all headers to the FCGI App
-            while wbuf.has_remaining() {
-                mut_inner.io.write_buf(&mut wbuf).await?;
-            }
+            kvw.flush().await?;
+            //mut_inner.io.encode(params).await?;
             trace!("sent header");
             //Note: Responses might arrive from this point on
 
@@ -243,35 +244,21 @@ impl Connection
             //send the body to the FCGI App
             if let Some(value) = len {
                 //CGI1.1 4.2 -> at least content-length data
-                let mut len: usize = if let Ok(vstr) = value.to_str() {
+                let len: usize = if let Ok(vstr) = value.to_str() {
                     vstr.parse().unwrap_or(0)
                 }else{
                     0
                 };
-                let mut body: B = req.into_body();
-                while let Some(buf) = body.data().await {
-                    if let Ok(mut b) = buf { //b: Buf
-                        let mut b = b.copy_to_bytes(b.remaining());
-                        len = len.saturating_sub(b.len());
-                        while b.remaining() > 0 {
-                            fastcgi::STDINBody::new(rid, &mut b).append(&mut wbuf);
-                        }
-                        while wbuf.has_remaining() {
-                            mut_inner.io.write_buf(&mut wbuf).await?;
-                        }
-                    }
-                }
-                
-                if len > 0 {
-                    //fix broken connection?
-                    error!("body to short. abort");
-                    fastcgi::Record::abort(rid).append(&mut wbuf);
-                }
+                mut_inner.io.data_stream(req.into_body(), 
+                    rid, 
+                    fastcgi::Record::STDIN,
+                    len).await?;
+            }else{
+                mut_inner.io.encode(FCGIType::STDIN {
+                    request_id: rid,
+                    data: Bytes::new()}).await?;
             }
-            fastcgi::STDINBody::new(rid, &mut Bytes::new()).append(&mut wbuf); //empty record to end STDIN steam FCGI1.0
-            while wbuf.has_remaining() {
-                mut_inner.io.write_buf(&mut wbuf).await?;
-            }
+            //empty record to end STDIN steam FCGI1.0
             debug!("sent req body");
         }
         //free mutex
@@ -623,8 +610,7 @@ impl InnerConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::{io::AsyncReadExt, runtime::Builder};
-    use tokio::net::TcpListener;
+    use tokio::{io::{AsyncReadExt, AsyncWriteExt}, runtime::Builder, net::TcpListener};
     use std::collections::{VecDeque,HashMap};
     use std::net::SocketAddr;
 
@@ -671,12 +657,12 @@ mod tests {
             app_socket.read_buf(&mut buf).await.unwrap();
             trace!("app read {:?}", buf);
             let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0i\x07\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\x05QUERY_STRINGlol=1\x0e\x03REQUEST_METHODGET\x0b\tHTTP_accepttext/html\x01\x04\0\x01\0i\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
-            assert_eq!(buf, &to_php[..]);//FIXME b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0i\x07\0"
+            assert_eq!(buf, Bytes::from(&to_php[..]));
             trace!("app answers on get");
             let from_php = b"\x01\x07\0\x01\0W\x01\0PHP Fatal error:  Kann nicht durch 0 teilen in /home/daniel/Public/test.php on line 14\n\0\x01\x06\0\x01\x01\xf7\x01\0Status: 404 Not Found\r\nX-Powered-By: PHP/7.3.16\r\nX-Authenticate: NTLM\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
             app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
         }
-
+        
         async fn con() {
             let a: SocketAddr = "127.0.0.1:59000".parse().unwrap();
             let app_listener = TcpListener::bind(a).await.unwrap();
