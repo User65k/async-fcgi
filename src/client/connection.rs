@@ -209,14 +209,14 @@ impl Connection
             
             if let Some(value) = req.headers().get(CONTENT_TYPE) { //if client CGI1.1 4.1.3.
                 kvw.add(fastcgi::NameValuePair::new(
-                        BytesMut::from(CONTENT_TYPE.as_str().as_bytes()).freeze(),
+                        Bytes::from(&b"CONTENT_TYPE"[..]),
                         BytesMut::from(value.as_bytes()).freeze()
                     )).await?;
             }
             let len = req.headers().get(CONTENT_LENGTH); //if body CGI1.1 4.1.2.
             if let Some(value) = len {
                 kvw.add(fastcgi::NameValuePair::new(
-                        BytesMut::from(CONTENT_LENGTH.as_str().as_bytes()).freeze(),
+                        Bytes::from(&b"CONTENT_LENGTH"[..]),
                         BytesMut::from(value.as_bytes()).freeze()
                     )).await?;
             }
@@ -647,8 +647,6 @@ mod tests {
 
     #[test]
     fn simple_get() {
-        extern crate pretty_env_logger;
-        pretty_env_logger::init();
             // Create the runtime
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         async fn mock_app(app_listener: TcpListener) {
@@ -777,6 +775,60 @@ mod tests {
 
             let read1 = res.data().await;
             assert!(read1.is_none());
+            m.await.unwrap();
+        }
+        rt.block_on(con());
+    }
+    #[test]
+    fn simple_post() {
+        extern crate pretty_env_logger;
+        pretty_env_logger::init();
+            // Create the runtime
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\x81\x07\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\0QUERY_STRING\x0e\x04REQUEST_METHODPOST\x0c\x13CONTENT_TYPEmultipart/form-data\x0e\x01CONTENT_LENGTH8\x01\x04\0\x01\0\x81\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\x08\0\0test=123\x01\x05\0\x01\0\0\0\0";
+            assert_eq!(buf, Bytes::from(&to_php[..]));
+            trace!("app answers on get");
+            let from_php = b"\x01\x07\0\x01\0W\x01\0PHP Fatal error:  Kann nicht durch 0 teilen in /home/daniel/Public/test.php on line 14\n\0\x01\x06\0\x01\x01\xf7\x01\0Status: 404 Not Found\r\nX-Powered-By: PHP/7.3.16\r\nX-Authenticate: NTLM\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
+            app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
+        }
+        
+        async fn con() {
+            let a: SocketAddr = "127.0.0.1:59003".parse().unwrap();
+            let app_listener = TcpListener::bind(a).await.unwrap();
+            let m = tokio::spawn(mock_app(app_listener));
+
+            let fcgi_con = Connection::connect(&"127.0.0.1:59003".parse().unwrap(), 1).await.unwrap();
+            trace!("new connection obj");
+            let mut l = VecDeque::new();
+            l.push_back(Bytes::from(&"test=123"[..]));
+            let b = TestBod{l};
+            
+            let req = Request::post("/test").header("Content-Length", "8").header("Content-Type", "multipart/form-data").body(b).unwrap();
+            trace!("new req obj");
+            let mut params = HashMap::new();
+            params.insert(
+                Bytes::from(&b"SCRIPT_FILENAME"[..]),
+                Bytes::from(&b"/home/daniel/Public/test.php"[..]),
+            );
+            let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
+            trace!("got res obj");
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);//FIXME 200
+            assert_eq!(res.headers().get("X-Powered-By").expect("powered by header missing"), "PHP/7.3.16");
+            let read1 = res.data().await;
+            assert!(read1.is_some());
+            let read1 = read1.unwrap();
+            assert!(read1.is_ok());
+            if let Ok(d) = read1 {
+                let body = b"<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n";
+                assert_eq!(d, &body[..] );
+            }
+            let read2 = res.data().await;
+            assert!(read2.is_none());
             m.await.unwrap();
         }
         rt.block_on(con());
