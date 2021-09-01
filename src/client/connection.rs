@@ -93,12 +93,39 @@ pub struct Connection
 {
     inner: Arc<Mutex<InnerConnection>>,
     sem: Arc<Semaphore>,
-    addr: FCGIAddr
+    addr: FCGIAddr,
+    header_mul: MultiHeaderStrategy,
+    header_nl: HeaderMultilineStrategy
+}
+#[derive(Copy, Clone)]
+pub enum MultiHeaderStrategy {
+    Combine,
+    OnlyFirst,
+    OnlyLast
+}
+#[derive(Copy, Clone)]
+pub enum HeaderMultilineStrategy {
+    Ignore,
+    ReturnError
 }
 impl Connection
 {
     /// Connect to a peer
-    pub async fn connect(addr: &FCGIAddr, max_req_per_con: u16) -> Result<Connection, Box<dyn Error>> {
+    #[inline]
+    pub async fn connect(addr: &FCGIAddr,
+        max_req_per_con: u16)
+        -> Result<Connection, Box<dyn Error>> {
+        Self::connect_with_strategy(addr,
+            max_req_per_con,
+            MultiHeaderStrategy::OnlyFirst,
+            HeaderMultilineStrategy::Ignore).await
+    }
+    /// Connect to a peer
+    pub async fn connect_with_strategy(addr: &FCGIAddr,
+        max_req_per_con: u16,
+        header_mul: MultiHeaderStrategy,
+        header_nl: HeaderMultilineStrategy)
+         -> Result<Connection, Box<dyn Error>> {
         Ok(Connection {
             inner: Arc::new(Mutex::new(InnerConnection{
                 io: FCGIWriter::new(BufReader::new(Stream::connect(addr).await?)),
@@ -106,7 +133,9 @@ impl Connection
                 fcgi_parser: fastcgi::RecordReader::new()
             })),
             sem: Arc::new(Semaphore::new(max_req_per_con as  usize)),
-            addr: addr.clone()
+            addr: addr.clone(),
+            header_mul,
+            header_nl
         })
     }
 
@@ -123,6 +152,11 @@ impl Connection
         Ok(())
     }
 
+    const QUERY_STRING: &'static [u8] = b"QUERY_STRING";
+    const REQUEST_METHOD: &'static [u8] = b"REQUEST_METHOD";
+    const CONTENT_TYPE: &'static [u8] = b"CONTENT_TYPE";
+    const CONTENT_LENGTH: &'static [u8] = b"CONTENT_LENGTH";
+    const NULL: &'static [u8] = b"";
     /// Forwards an HTTP request to a FGCI Application
     ///
     /// Fills QUERY_STRING, REQUEST_METHOD, CONTENT_TYPE and CONTENT_LENGTH
@@ -149,12 +183,14 @@ impl Connection
     /// - REQUEST_URI       common
     /// - DOCUMENT_URI      common
     /// - DOCUMENT_ROOT     common
-    pub async fn forward<B, I>(&self,
+    pub async fn forward<B, I, P1, P2>(&self,
                         req: Request<B>,
                         dyn_headers: I)
                     -> Result<Response<impl Body<Data = Bytes,Error = IoError>>, IoError>
     where   B: Body+Unpin,
-            I: IntoIterator<Item = (Bytes, Bytes)>
+            I: IntoIterator<Item = (P1,P2)>,
+            P1: Buf,
+            P2: Buf
     {
         let rid: u16;
         {
@@ -198,43 +234,108 @@ impl Connection
     
             kvw.extend(dyn_headers).await?;
 
-            let query = match req.uri().query() {
-                Some(query) => BytesMut::from(query.as_bytes()).freeze(),
-                None => Bytes::new()
-            };
-            kvw.add(fastcgi::NameValuePair::new(Bytes::from(&b"QUERY_STRING"[..]),query)).await?; //must CGI1.1 4.1.7
+            match req.uri().query(){
+                Some(query) => kvw.add_kv(Self::QUERY_STRING, query.as_bytes()).await?, //must CGI1.1 4.1.7
+                None => kvw.add_kv(Self::QUERY_STRING, Self::NULL).await? //must CGI1.1 4.1.7
+            }
         
-            let method = BytesMut::from(req.method().as_str().as_bytes()).freeze();
-            kvw.add(fastcgi::NameValuePair::new(Bytes::from(&b"REQUEST_METHOD"[..]),method)).await?; //must CGI1.1 4.1.12
+            kvw.add_kv(Self::REQUEST_METHOD, req.method().as_str().as_bytes()).await?; //must CGI1.1 4.1.12
             
-            if let Some(value) = req.headers().get(CONTENT_TYPE) { //if client CGI1.1 4.1.3.
-                kvw.add(fastcgi::NameValuePair::new(
-                        Bytes::from(&b"CONTENT_TYPE"[..]),
-                        BytesMut::from(value.as_bytes()).freeze()
-                    )).await?;
-            }
-            let len = req.headers().get(CONTENT_LENGTH); //if body CGI1.1 4.1.2.
-            if let Some(value) = len {
-                kvw.add(fastcgi::NameValuePair::new(
-                        Bytes::from(&b"CONTENT_LENGTH"[..]),
-                        BytesMut::from(value.as_bytes()).freeze()
-                    )).await?;
-            }
-            let skip = [AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE];
-            //append all HTTP headers
-            for (key, value) in req.headers().iter() {
-                if skip.iter().find(|x| x == key).is_some() { //CGI1.1 4.1.18.
-                    continue;
+            let (len, body) = {
+                let (parts, body) = req.into_parts();
+                let headers = parts.headers;
+
+                if let Some(value) = headers.get(CONTENT_TYPE) { //if client CGI1.1 4.1.3.
+                    kvw.add_kv(
+                            Self::CONTENT_TYPE,
+                            value.as_bytes()
+                        ).await?;
                 }
-                let mut k = BytesMut::with_capacity(key.as_str().len()+5);
-                k.put(&b"HTTP_"[..]);
-                k.put(key.as_str().as_bytes()); //FIXME copy
-                let v = BytesMut::from(value.as_bytes()).freeze();
-                let p = fastcgi::NameValuePair::new(k.freeze(),v);
-                kvw.add(p).await?;
-            }
-            //send all headers to the FCGI App
-            kvw.flush().await?;
+                
+                let len: Option<usize> = if let Some(value) = headers.get(CONTENT_LENGTH) { //if body CGI1.1 4.1.2.
+                    kvw.add_kv(
+                            Self::CONTENT_LENGTH,
+                            value.as_bytes()
+                        ).await?;
+                    Some(value.to_str().ok()
+                        .and_then(|s|s.parse().ok())
+                        .unwrap_or(0))
+                }else{
+                    None
+                };
+                let skip = [AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE];
+                //append all HTTP headers
+                for key in headers.keys() {
+                    if skip.iter().find(|x| x == key).is_some() { //CGI1.1 4.1.18.
+                        continue;
+                    }
+                    /*rfc3875
+                    The HTTP header field name is converted to upper case, has all
+                    occurrences of "-" replaced with "_" and has "HTTP_" prepended to
+                    give the meta-variable name.
+                    */
+                    let mut k = BytesMut::with_capacity(key.as_str().len()+5);
+                    k.put(&b"HTTP_"[..]);
+                    for &c in key.as_str().as_bytes() {
+                        let upper = match c {
+                            b'-' => b'_',
+                            lower_acii if b'a' <= lower_acii && lower_acii <= b'z' => lower_acii - (b'a'-b'A'), //a ... z
+                            s => s
+                        };
+                        k.put_u8(upper);
+                    }
+                    /*rfc3875
+                    If multiple header fields with the same field-name
+                    are received then the server MUST rewrite them as a single value
+                    having the same semantics.  Similarly, a header field that spans
+                    multiple lines MUST be merged onto a single line.
+
+                    RFC 7230, Section 3.2.2, Field Order: Set-Cookie is special
+                    -> but not part of a request
+
+                    RFC 7230, Section 3.2.4, Field Parsing: multiline header -> 400/502
+                    */
+                    let mut value_buf;
+                    let value = match self.header_mul {
+                        MultiHeaderStrategy::Combine => {
+                            value_buf = BytesMut::with_capacity(512);
+                            let mut first = false;
+                            for v in headers.get_all(key).iter() {
+                                if !first {
+                                    first = true;
+                                }else{
+                                    value_buf.put_u8(b',');
+                                }
+                                let v = v.as_bytes();
+                                value_buf.put_slice(v);//copy
+                            }
+                            value_buf.as_ref()
+                        },
+                        MultiHeaderStrategy::OnlyFirst => {
+                            match headers.get(key) {
+                                Some(v) => v.as_bytes(),
+                                None => Self::NULL
+                            }
+                        },
+                        MultiHeaderStrategy::OnlyLast => {
+                            match headers.get_all(key).iter().next_back() {
+                                Some(v) => v.as_bytes(),
+                                None => Self::NULL
+                            }
+                            
+                        }
+                    };
+                    if let HeaderMultilineStrategy::ReturnError = self.header_nl {
+                        if value.as_ref().contains(&b'\n') {
+                            return Err(IoError::new(ErrorKind::InvalidData,"multiline headers are not allowed"));
+                        }
+                    }
+                    kvw.add_kv(k, value).await?;
+                }
+                //send all headers to the FCGI App
+                kvw.flush().await?;
+                (len, body)
+            };
             //mut_inner.io.encode(params).await?;
             trace!("sent header");
             //Note: Responses might arrive from this point on
@@ -242,14 +343,9 @@ impl Connection
             // FIXME stdin after end!!!!!!!
 
             //send the body to the FCGI App
-            if let Some(value) = len {
+            if let Some(len) = len {
                 //CGI1.1 4.2 -> at least content-length data
-                let len: usize = if let Ok(vstr) = value.to_str() {
-                    vstr.parse().unwrap_or(0)
-                }else{
-                    0
-                };
-                mut_inner.io.data_stream(req.into_body(), 
+                mut_inner.io.data_stream(body,
                     rid, 
                     fastcgi::Record::STDIN,
                     len).await?;

@@ -136,17 +136,22 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
     /// will append and write a header if needed
     /// the buffer might not be empty after the function is done
     #[inline]
-    async fn append_to_stream(&mut self, val: &mut Bytes, buf: &mut BytesMut, request_id: u16, rtype: u8) -> std::io::Result<()> {
-        while buf.len()+val.len() > BUF_LEN {
-            let mut part = val.split_to(BUF_LEN - buf.len());
+    async fn append_to_stream<B>(&mut self, mut val: B, buf: &mut BytesMut, request_id: u16, rtype: u8) -> std::io::Result<()>
+        where B: Buf {
+        while buf.len()+val.remaining() > BUF_LEN {
+            let mut part = val.take(BUF_LEN - buf.len());
             Header::new(rtype,request_id, (BUF_LEN-HEADER_LEN) as u16)
                 .write_into(&mut &mut buf[0..HEADER_LEN]);
-            self.write_whole_buf(buf).await?;
+
+            let old_buf = std::mem::replace(buf, BytesMut::with_capacity(BUF_LEN));
+
+            self.write_whole_buf(&mut old_buf.freeze()).await?;
             self.write_whole_buf(&mut part).await?;
-            *buf = BytesMut::with_capacity(BUF_LEN);
+            val = part.into_inner();
+            
             buf.put_slice(&[0;8]);//reserve space for header
         }
-        buf.extend_from_slice(&val);
+        buf.put(val);
         Ok(())
     }
     /// write buf and padding and append an emty header to indicate the steams end
@@ -185,9 +190,9 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
         buf.put_slice(&[0;8]);//reserve space for header
         while let Some(chunk) = body.data().await {
             if let Ok(mut b) = chunk { //b: Buf
-                let mut val = b.copy_to_bytes(b.remaining());
+                let val = b.copy_to_bytes(b.remaining());
                 len = len.saturating_sub(val.len());
-                self.append_to_stream(&mut val, &mut buf, request_id, rtype).await?;
+                self.append_to_stream(val, &mut buf, request_id, rtype).await?;
             }
         }
                 
@@ -245,16 +250,21 @@ impl <R: AsyncWrite+Unpin>NameValuePairWriter<'_, R> {
         self.w.end_stream(self.buf,self.request_id, self.rtype).await?;
         Ok(())
     }
-    pub async fn extend<T: IntoIterator<Item = (Bytes, Bytes)>>(&mut self, iter: T) -> std::io::Result<()> {
+    pub async fn extend<T: IntoIterator<Item = (P1,P2)>, P1: Buf, P2: Buf>(&mut self, iter: T) -> std::io::Result<()> {
         for (k,v) in iter {
-            self.add(NameValuePair::new(k,v)).await?;
+            self.add_kv(k,v).await?;
         }
         Ok(())
     }
     #[inline]
-    pub async fn add(&mut self, pair: NameValuePair) -> std::io::Result<()> {
-        let mut ln = pair.name_data.len();
-        let mut lv = pair.value_data.len();
+    pub async fn add(&mut self, mut pair: NameValuePair) -> std::io::Result<()> {
+        self.add_kv(&mut pair.name_data, &mut pair.value_data).await
+    }
+    #[inline]
+    pub async fn add_kv<B1,B2>(&mut self, mut name: B1, mut val: B2) -> std::io::Result<()>
+        where B1: Buf, B2: Buf {
+        let mut ln = name.remaining();
+        let mut lv = val.remaining();
         let mut lf: usize = 2;
         if ln > 0x7f {
             if ln > 0x7fffffff {
@@ -295,10 +305,8 @@ impl <R: AsyncWrite+Unpin>NameValuePairWriter<'_, R> {
             self.buf.put_u8(lv as u8);
         }
         
-        let mut name = pair.name_data;
         self.w.append_to_stream(&mut name, &mut self.buf,self.request_id, self.rtype).await?;
 
-        let mut val = pair.value_data;
         self.w.append_to_stream(&mut val, &mut self.buf,self.request_id, self.rtype).await?;
         Ok(())
     }

@@ -107,10 +107,12 @@ impl ConPool
     /// Forwards an HTTP request to a FGCI Application
     ///
     /// Calls the corresponding function of an available [Connection](../connection/struct.Connection.html#method.forward).
-    pub async fn forward<B, I>(&self, req: Request<B>, dyn_headers: I)
+    pub async fn forward<B, I, P1, P2>(&self, req: Request<B>, dyn_headers: I)
                             -> Result<Response<impl HttpBody<Data = Bytes,Error = IoError>>, IoError>
     where   B: HttpBody+Unpin,
-            I: IntoIterator<Item = (Bytes, Bytes)>
+            I: IntoIterator<Item = (P1,P2)>,
+            P1: Buf,
+            P2: Buf
     {
         self.con_pool.forward(req, dyn_headers).await
     }
