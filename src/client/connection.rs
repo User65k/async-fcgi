@@ -750,7 +750,7 @@ mod tests {
             let mut buf = BytesMut::with_capacity(4096);
             app_socket.read_buf(&mut buf).await.unwrap();
             trace!("app read {:?}", buf);
-            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0i\x07\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\x05QUERY_STRINGlol=1\x0e\x03REQUEST_METHODGET\x0b\tHTTP_accepttext/html\x01\x04\0\x01\0i\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0i\x07\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\x05QUERY_STRINGlol=1\x0e\x03REQUEST_METHODGET\x0b\tHTTP_ACCEPTtext/html\x01\x04\0\x01\0i\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
             assert_eq!(buf, Bytes::from(&to_php[..]));
             trace!("app answers on get");
             let from_php = b"\x01\x07\0\x01\0W\x01\0PHP Fatal error:  Kann nicht durch 0 teilen in /home/daniel/Public/test.php on line 14\n\0\x01\x06\0\x01\x01\xf7\x01\0Status: 404 Not Found\r\nX-Powered-By: PHP/7.3.16\r\nX-Authenticate: NTLM\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
@@ -776,7 +776,7 @@ mod tests {
             );
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
-            assert_eq!(res.status(), StatusCode::NOT_FOUND);//FIXME 200
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
             assert_eq!(res.headers().get("X-Powered-By").expect("powered by header missing"), "PHP/7.3.16");
             let read1 = res.data().await;
             assert!(read1.is_some());
@@ -818,7 +818,7 @@ mod tests {
             };
             let req = Request::get("/").body(b).unwrap();
             trace!("new req obj");
-            let params = HashMap::new();
+            let params: HashMap<Bytes,Bytes> = HashMap::new();
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
             let read1 = res.data().await;
@@ -862,7 +862,7 @@ mod tests {
             };
             let req = Request::get("/").body(b).unwrap();
             trace!("new req obj");
-            let params = HashMap::new();
+            let params: HashMap<Bytes,Bytes> = HashMap::new();
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
             assert_eq!(res.status(), StatusCode::OK);
@@ -889,7 +889,7 @@ mod tests {
             let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\x81\x07\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\0QUERY_STRING\x0e\x04REQUEST_METHODPOST\x0c\x13CONTENT_TYPEmultipart/form-data\x0e\x01CONTENT_LENGTH8\x01\x04\0\x01\0\x81\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\x08\0\0test=123\x01\x05\0\x01\0\0\0\0";
             assert_eq!(buf, Bytes::from(&to_php[..]));
             trace!("app answers on get");
-            let from_php = b"\x01\x07\0\x01\0W\x01\0PHP Fatal error:  Kann nicht durch 0 teilen in /home/daniel/Public/test.php on line 14\n\0\x01\x06\0\x01\x01\xf7\x01\0Status: 404 Not Found\r\nX-Powered-By: PHP/7.3.16\r\nX-Authenticate: NTLM\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
+            let from_php = b"\x01\x06\0\x01\x00\x23\x05\0Status: 201 Created\r\n\r\n<html><body>#+#+#\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
             app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
         }
         
@@ -913,14 +913,13 @@ mod tests {
             );
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
-            assert_eq!(res.status(), StatusCode::NOT_FOUND);//FIXME 200
-            assert_eq!(res.headers().get("X-Powered-By").expect("powered by header missing"), "PHP/7.3.16");
+            assert_eq!(res.status(), StatusCode::CREATED);
             let read1 = res.data().await;
             assert!(read1.is_some());
             let read1 = read1.unwrap();
             assert!(read1.is_ok());
             if let Ok(d) = read1 {
-                let body = b"<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n";
+                let body = b"<html><body>";
                 assert_eq!(d, &body[..] );
             }
             let read2 = res.data().await;
