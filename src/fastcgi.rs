@@ -448,7 +448,7 @@ impl Record
         }
         data.advance(8);
         debug!("read type {}", header.rtype);
-        trace!("payload: {:?}", &data.slice(..len));
+        trace!("payload: {:?}", &data.slice(..header.content_length as usize));
         let body = data.slice(0..header.content_length as usize);
         data.advance(len);
         let body = Record::parse_body(body, header.rtype);
@@ -489,49 +489,35 @@ impl Record
         }
     }
     ///serialize this record and append it to buf
-    pub(crate) fn append(self, buf: &mut BufList<Bytes>)
+    pub(crate) fn append<BM: BufMut>(self, buf: &mut BM)
     {
         match self.body
         {
             Body::BeginRequest(brb) => {
-                let mut data = BytesMut::with_capacity(Header::HEADER_LEN+8);
-                self.header.write_into(&mut data);
-                brb.write_into(&mut data);
-                buf.push(data.into());
+                self.header.write_into(buf);
+                brb.write_into(buf);
             },
             Body::Params(nvs) | Body::GetValues(nvs) | Body::GetValuesResult(nvs) => {
-                let mut data = BytesMut::with_capacity(Header::HEADER_LEN);
                 let pad = self.header.padding_length as usize;
-                self.header.write_into(&mut data);
-                let header = data.freeze();
-                buf.push(header.clone());
-                buf.append(nvs.pairs);
-                if pad>0 {
-                    buf.push(header.slice(0..pad));//..8 <= Header::HEADER_LEN
-                }
+                self.header.write_into(buf);
+                let kvp = nvs.drain().0;
+                buf.put(kvp);
+                unsafe { buf.advance_mut(pad); } // padding, value does not matter
             },
             Body::StdIn(b) => {
-                let mut data = BytesMut::with_capacity(Header::HEADER_LEN);
                 let pad = self.header.padding_length as usize;
-                self.header.write_into(&mut data);
-                let header = data.freeze();
-                buf.push(header.clone());
+                self.header.write_into(buf);
                 if !b.has_remaining()
                 {
                     //end stream has no data or padding
                     debug_assert!(pad==0);
                     return;
                 }
-                buf.push(b);
-                if pad>0 {
-                    buf.push(header.slice(0..pad));//..8 <= Header::HEADER_LEN
-                }
+                buf.put(b);
+                unsafe { buf.advance_mut(pad); } // padding, value does not matter
             },
             Body::Abort => {
-                let mut data = BytesMut::with_capacity(Header::HEADER_LEN);
-                self.header.write_into(&mut data);
-                let header = data.freeze();
-                buf.push(header);
+                self.header.write_into(buf);
             },
             _ => panic!("not impl"),
         }
@@ -663,7 +649,7 @@ impl NVBodyList{
         }
         nv.add(pair).expect("KVPair bigger that 0xFFFF");
     }
-    pub(crate) fn append_records(self, rtype: u8, request_id: u16, wbuf: &mut BufList<Bytes>) {
+    pub(crate) fn append_records<BM: BufMut>(self, rtype: u8, request_id: u16, wbuf: &mut BM) {
         for nvbod in self.bodies {
             nvbod.to_record(rtype, request_id).append(wbuf);
         }
@@ -691,12 +677,11 @@ impl Extend<(Bytes, Bytes)> for NVBodyList
 
 impl BeginRequestBody
 {
-    pub fn write_into(self, data: &mut BytesMut)
+    pub fn write_into<BM: BufMut>(self, data: &mut BM)
     {
         data.put_u16(self.role);
         data.put_u8(self.flags);
         data.put_slice(&[0;5]); // reserved
-        debug!("br {} -> {:?}",self.role, &data);
     }
 }
 
@@ -723,7 +708,7 @@ impl std::fmt::Debug for NameValuePair {
 
 #[test]
 fn encode_simple_get() {
-    let mut b = BufList::new();
+    let mut b = BytesMut::with_capacity(80);
     BeginRequestBody::new(BeginRequestBody::RESPONDER,0,1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(Bytes::from(&b"SCRIPT_FILENAME"[..]),Bytes::from(&b"/home/daniel/Public/test.php"[..]))).expect("record full");
@@ -733,13 +718,15 @@ fn encode_simple_get() {
     let mut dst = [0; 80];
     b.copy_to_slice(&mut dst);
 
-    assert_eq!(dst,
-     &b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0-\x03\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x01\x04\0\x01\x04\0\x01\0\0\0\0"[..]
-    );
+    let expected = b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0-\x03\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x01\x04\0\x01\x04\0\x01\0\0\0\0";
+
+    assert_eq!(dst[..69],expected[..69]);
+    //padding is uninit
+    assert_eq!(dst[72..],expected[72..]);
 }
 #[test]
 fn encode_post() {
-    let mut b = BufList::new();
+    let mut b = BytesMut::with_capacity(80);
     BeginRequestBody::new(BeginRequestBody::RESPONDER,0,1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(Bytes::from(&b"SCRIPT_FILENAME"[..]),Bytes::from(&b"/home/daniel/Public/test.php"[..]))).expect("record full");
@@ -750,6 +737,16 @@ fn encode_post() {
 
     let mut dst = [0; 104];
     b.copy_to_slice(&mut dst);
-    assert_eq!(dst,
-     &b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0-\x03\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x01\x04\0\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\x03\x05\0a=b\x01\x05\0\x01\0\x01\x05\0\x01\0\0\0\0"[..]);
+    //padding is uninit
+    dst[69] = 0xFF;
+    dst[70] = 0xFF;
+    dst[71] = 0xFF;
+    dst[91] = 0xFF;
+    dst[92] = 0xFF;
+    dst[93] = 0xFF;
+    dst[94] = 0xFF;
+    dst[95] = 0xFF;
+    let expected = b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0-\x03\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\xff\xff\xff\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\x03\x05\0a=b\xff\xff\xff\xff\xff\x01\x05\0\x01\0\0\0\0";
+
+    assert_eq!(dst, &expected[..]);
 }
