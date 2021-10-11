@@ -21,11 +21,9 @@ use http_body::Body as HttpBody;
 use std::iter::IntoIterator;
 use std::fmt;
 use crate::stream::{FCGIAddr, Stream};
-use crate::fastcgi::{NVBodyList, Record, Body, MAX_CONNS, MAX_REQS, MPXS_CONNS};
-use crate::bufvec::BufList;
-use std::iter::FromIterator;
-use std::collections::HashMap;
-use tokio::io::{AsyncReadExt,AsyncWriteExt};
+use crate::fastcgi::{Record, Body, MAX_CONNS, MAX_REQS, MPXS_CONNS};
+use crate::codec::FCGIWriter;
+use tokio::io::AsyncReadExt;
 
 #[cfg(feature = "app_start")]
 use std::process::Stdio;
@@ -50,26 +48,16 @@ impl ConPool
 {
     pub async fn new(sock_addr: &FCGIAddr) -> Result<ConPool, Box<dyn Error>> {
         // query VALUES from connection
-        let mut stream = Stream::connect(sock_addr).await?;
-        let mut query = HashMap::new();
-        query.insert(
-            Bytes::from(MAX_CONNS),
-            Bytes::new(),
-        );
-        query.insert(
-            Bytes::from(MAX_REQS),
-            Bytes::new(),
-        );
-        query.insert(
-            Bytes::from(MPXS_CONNS),
-            Bytes::new(),
-        );
-        let vals = NVBodyList::from_iter(query);
-        let mut wbuf = BufList::new();
-        vals.append_records(Record::GET_VALUES, Record::MGMT_REQUEST_ID, &mut wbuf);
+        let stream = Stream::connect(sock_addr).await?;
+        let mut stream = FCGIWriter::new(stream);
+        let mut kvw = stream.kv_stream(Record::MGMT_REQUEST_ID, Record::GET_VALUES);
+        kvw.add_kv(MAX_CONNS, Bytes::new()).await?;
+        kvw.add_kv(MAX_REQS, Bytes::new()).await?;
+        kvw.add_kv(MPXS_CONNS, Bytes::new()).await?;
+        kvw.flush().await?;
         let mut max_cons = 1;
         let mut max_req_per_con = 1;
-        for rec in send_and_receive(&mut stream, &mut wbuf).await? {
+        for rec in send_and_receive(&mut stream).await? {
             if let Body::GetValuesResult(kvs) = rec.body {
                 for kv in kvs.drain() {
                     match kv.name_data.chunk() {
@@ -136,10 +124,7 @@ fn parse_int<I: std::str::FromStr>(bytes: Bytes) -> Option<I> {
 }
 
 /// Note: only use this if there are no requests pending
-async fn send_and_receive(stream: &mut Stream, wbuf: &mut BufList<Bytes>) -> Result<Vec<Record>, IoError> {
-    while wbuf.has_remaining() {
-        stream.write_buf(wbuf).await?;
-    }
+async fn send_and_receive(stream: &mut FCGIWriter<Stream>) -> Result<Vec<Record>, IoError> {
     let mut recs = Vec::new();
 
     trace!("prep 4 read");
@@ -194,6 +179,9 @@ mod tests {
     use super::*;
     use tokio::runtime::Builder;
     use std::process::ExitStatus;
+    use std::iter::FromIterator;
+    use tokio::io::AsyncWriteExt;
+    use std::collections::HashMap;
 
     #[cfg(feature = "app_start")]
     #[test]
@@ -236,15 +224,17 @@ mod tests {
 
             let mut buf = buf.freeze();
             trace!("app read {:?}", buf);
-            let rec = Record::read(&mut buf).unwrap(); //FIXME
+            let rec = Record::read(&mut buf).unwrap(); //val stream
             assert_eq!(rec.get_request_id(), 0);
             let v = match rec.body {
                 Body::GetValues(v) => v,
                 _ => panic!("wrong body"),
             };            
             let names = Vec::from_iter(v.drain());
-            
             assert_eq!(names.len(),3);
+
+            let _ = Record::read(&mut buf).unwrap(); //val stream end
+            
             assert!(!buf.has_remaining());
 
             trace!("app answers on get");
