@@ -1,5 +1,5 @@
 [![Project Status: Active – The project has reached a stable, usable state and is being actively developed.](https://www.repostatus.org/badges/latest/active.svg)](https://www.repostatus.org/#active)
-[![crates.io](https://meritbadge.herokuapp.com/async-fcgi)](https://crates.io/crates/async-fcgi)
+[![crates.io](https://img.shields.io/crates/v/async-fcgi.svg)](https://crates.io/crates/async-fcgi)
 [![Released API docs](https://docs.rs/async-fcgi/badge.svg)](https://docs.rs/async-fcgi)
 [![GitHub](https://img.shields.io/github/license/User65k/async-fcgi)](./LICENSE)
 
@@ -19,16 +19,17 @@ Tested with:
 
 `cargo run --example webserver --features="con_pool"`
 
-# TODOs
+# Features
 
-- [x] `Connection` should handle UnixStream and TCPStream transparently
+- [x] Handle UnixStream and TCPStream transparently
+- [x] reconnect to the FCGI App if a connection is closed
+- [x] Start an FCGI server (exec + env)
+- [x] Support Key-Value Pairs bigger than maximum record size
+- [ ] "Full Duplex" connection to the FCGI Server/App (e.g stream STDIN and OUT at the same time)
 - [ ] `con_pool` should handle more than one connection :sweat_smile: and load balance
-- [ ] A dropped `FCGIBody` should not block a RequestID
-- [x] `Connection` should reconnect to the FCGI App if a connection is closed
+- [ ] A dropped `FCGIBody` should not block a RequestID and cancel the request
 - [ ] `Connection` should handle overload error from FCGI app
 - [ ] Parsing for FCGI application/server side
-- [x] Means to start an FCGI server (exec + env)
-- [ ] Support Key-Value Pairs bigger than maximum record size
 
 PullRequests are welcome BTW
 
