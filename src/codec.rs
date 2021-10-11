@@ -132,9 +132,10 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
         kvps.flush().await?;
         Ok(())
     }
-    /// add val to the stream buffer buf
-    /// will append and write a header if needed
-    /// the buffer might not be empty after the function is done
+    /// add val to the stream.
+    /// will append and write a header if needed.
+    /// will use `buf` to buffer small writes.
+    /// `buf` might not be empty after the function is done. Use `end_stream` to flush the buffer.
     #[inline]
     async fn append_to_stream<B>(&mut self, mut val: B, buf: &mut BytesMut, request_id: u16, rtype: u8) -> std::io::Result<()>
         where B: Buf {
@@ -143,12 +144,11 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
             Header::new(rtype,request_id, (BUF_LEN-HEADER_LEN) as u16)
                 .write_into(&mut &mut buf[0..HEADER_LEN]);
 
-            let old_buf = std::mem::replace(buf, BytesMut::with_capacity(BUF_LEN));
-
-            self.write_whole_buf(&mut old_buf.freeze()).await?;
+            self.write_whole_buf(buf).await?;
             self.write_whole_buf(&mut part).await?;
             val = part.into_inner();
             
+            buf.clear();
             buf.put_slice(&[0;8]);//reserve space for header
         }
         buf.put(val);
@@ -176,6 +176,7 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
         self.write_whole_buf(&mut end).await?;
         Ok(())
     }
+    /// write `data` to the stream.
     async fn encode_data(&mut self, request_id: u16, rtype: u8, mut data: Bytes) -> std::io::Result<()> {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
         buf.put_slice(&[0;8]);//reserve space for header
@@ -184,6 +185,7 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
         Ok(())
     }
     #[cfg(feature = "web_server")]
+    /// Write `body` to the stream
     pub async fn data_stream<B>(&mut self, mut body: B, request_id: u16, rtype: u8, mut len: usize) -> std::io::Result<()>
     where B: Body+Unpin {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
@@ -207,6 +209,13 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
         self.end_stream(buf,request_id, rtype).await?;
         Ok(())
     }
+    /// Create a NameValuePairWriter for this stream in order to write key value pairs (like PARAMS).
+    /// ```
+    /// let mut kvw = fcgi_writer.kv_stream(1, fastcgi::Record::PARAMS);
+    /// kvw.add_kv(b"QUERY_STRING", b"").await?;
+    /// kvw.flush().await?;
+    /// ```
+    /// See `encode_kvp`
     pub fn kv_stream(&mut self, request_id: u16, rtype: u8) -> NameValuePairWriter<W> {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
         buf.put_slice(&[0;8]);//reserve space for header
@@ -238,6 +247,9 @@ impl <W: AsyncRead>FCGIWriter<W> {
     }
 }
 */
+
+/// Writes Key Value Pairs to the stream
+/// Uses an internal write buffer
 pub struct NameValuePairWriter<'a, R>{
     w: & 'a mut FCGIWriter<R>,
     request_id: u16,
@@ -245,11 +257,14 @@ pub struct NameValuePairWriter<'a, R>{
     buf: BytesMut
 }
 impl <R: AsyncWrite+Unpin>NameValuePairWriter<'_, R> {
+    /// write all remaining data to the stream
     pub async fn flush(self) -> std::io::Result<()> {
         //write a header
         self.w.end_stream(self.buf,self.request_id, self.rtype).await?;
         Ok(())
     }
+    /// add all Key Value Pairs to the stream
+    /// Panics if a Key or Value is bigger than 0x7fffffff bytes
     pub async fn extend<T: IntoIterator<Item = (P1,P2)>, P1: Buf, P2: Buf>(&mut self, iter: T) -> std::io::Result<()> {
         for (k,v) in iter {
             self.add_kv(k,v).await?;
@@ -257,10 +272,14 @@ impl <R: AsyncWrite+Unpin>NameValuePairWriter<'_, R> {
         Ok(())
     }
     #[inline]
+    /// add a Key Value Pair to the stream
+    /// Panics if Key or Value is bigger than 0x7fffffff bytes
     pub async fn add(&mut self, mut pair: NameValuePair) -> std::io::Result<()> {
         self.add_kv(&mut pair.name_data, &mut pair.value_data).await
     }
     #[inline]
+    /// add a Key Value Pair to the stream
+    /// Panics if Key or Value is bigger than 0x7fffffff bytes
     pub async fn add_kv<B1,B2>(&mut self, mut name: B1, mut val: B2) -> std::io::Result<()>
         where B1: Buf, B2: Buf {
         let mut ln = name.remaining();
@@ -280,17 +299,16 @@ impl <R: AsyncWrite+Unpin>NameValuePairWriter<'_, R> {
             lf +=3;
             lv |= 0x8000;
         }
+        // check if size info fits into buf
         if self.buf.len() + lf > BUF_LEN {
-            //write a header
+            //No -> write buf with a header
             Header::new(self.rtype,
                 self.request_id,
                 (self.buf.len()-HEADER_LEN) as u16)
                 .write_into(&mut &mut self.buf[0..HEADER_LEN]);
 
-            let mut old_buf = std::mem::replace(&mut self.buf,
-                BytesMut::with_capacity(BUF_LEN))
-                .freeze();
-            self.w.write_whole_buf(&mut old_buf).await?;
+            self.w.write_whole_buf(&mut self.buf).await?;
+            self.buf.clear();
             self.buf.put_slice(&[0;8]);//reserve space for header
         }
 
