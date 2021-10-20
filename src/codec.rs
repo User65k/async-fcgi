@@ -62,6 +62,7 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
     pub async fn shutdown(&mut self) -> std::io::Result<()> {
         self.io.shutdown().await
     }
+    #[inline]
     async fn write_whole_buf<B: Buf>(&mut self, buf: &mut B) -> std::io::Result<()> {
         while buf.has_remaining() {
             // Writes some prefix of the byte string, not necessarily
@@ -185,7 +186,7 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
         Ok(())
     }
     #[cfg(feature = "web_server")]
-    /// Write `body` to the stream
+    /// Write whole `body` to the stream
     pub async fn data_stream<B>(&mut self, mut body: B, request_id: u16, rtype: u8, mut len: usize) -> std::io::Result<()>
     where B: Body+Unpin {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
@@ -207,6 +208,38 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
                 "body too short"));
         }
         self.end_stream(buf,request_id, rtype).await?;
+        Ok(())
+    }
+    #[cfg(feature = "web_server")]
+    /// Write data to the stream.
+    /// Insert header as needed.
+    /// do not end the data stream
+    pub async fn flush_data_chunk<B>(&mut self, mut data: B, request_id: u16, rtype: u8) -> std::io::Result<()>
+    where B: Buf {
+        let mut header = BytesMut::with_capacity(HEADER_LEN);
+        while data.remaining() > BUF_LEN - HEADER_LEN {
+            let mut part = data.take(BUF_LEN - HEADER_LEN);
+            Header::new(rtype,request_id, (BUF_LEN-HEADER_LEN) as u16)
+                .write_into(&mut header);
+
+            self.write_whole_buf(&mut header).await?;
+            self.write_whole_buf(&mut part).await?;
+            data = part.into_inner();
+            header.clear();
+        }
+        let last_head = Header::new(rtype, request_id, data.remaining() as u16);
+        let pad = last_head.get_padding() as usize;
+        last_head.write_into(&mut header);
+        if data.remaining()==0 {
+            self.write_whole_buf(&mut header).await?;
+            return  Ok(());
+        }
+        let mut buf = header.freeze();
+        let mut pad = buf.slice(0..pad);
+        self.write_whole_buf(&mut buf).await?;
+        self.write_whole_buf(&mut data).await?;
+        //padding
+        self.write_whole_buf(&mut pad).await?;
         Ok(())
     }
     /// Create a NameValuePairWriter for this stream in order to write key value pairs (like PARAMS).

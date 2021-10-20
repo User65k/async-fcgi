@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use bytes::Bytes;
 use async_fcgi::client::connection::Connection;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() {
     let mut fcgi_con = Connection::connect(&"127.0.0.1:59000".parse().unwrap(), 1).await.unwrap();
     let req = Request::get("/test?lol=1").header("Accept", "text/html").body(()).unwrap();
@@ -192,173 +192,210 @@ impl Connection
             P1: Buf,
             P2: Buf
     {
-        let rid: u16;
-        {
-            info!("new request pending");
-            let _permit = self.sem.clone().acquire_owned().await.map_err(|_e|IoError::new(ErrorKind::WouldBlock,""))?;
-            let meta = FCGIRequest {
-                buf: BufList::new(),
-                waker: None,
-                ended: false,
-                _permit
-            };
-            
-            info!("wait for lock");
-            let mut mut_inner = self.inner.lock().await;
-
-            if mut_inner.check_alive().await?==false {
-                // we need to connect again
-                info!("reconnect...");
-                if let Err(e) = mut_inner.io.shutdown().await {
-                    error!("shutdown old con: {}", e);
-                }
-                mut_inner.notify_everyone();
-                mut_inner.io = FCGIWriter::new(BufReader::new(Stream::connect(&self.addr).await?));
-                mut_inner.fcgi_parser = fastcgi::RecordReader::new();
-                info!("reconnected");
-            }
-
-            rid = (mut_inner.running_requests.insert(meta)+1) as u16;
-            info!("started req #{}", rid);
-            //entry.insert(meta);
-
-            let br = FCGIType::BeginRequest{
-                request_id: rid,
-                role: fastcgi::BeginRequestBody::RESPONDER,
-                flags: fastcgi::BeginRequestBody::KEEP_CONN
-            };
-            mut_inner.io.encode(br).await?;
-            //Prepare the CGI headers
-            let mut kvw = mut_inner.io.kv_stream(rid,
-                fastcgi::Record::PARAMS);
-    
-            kvw.extend(dyn_headers).await?;
-
-            match req.uri().query(){
-                Some(query) => kvw.add_kv(Self::QUERY_STRING, query.as_bytes()).await?, //must CGI1.1 4.1.7
-                None => kvw.add_kv(Self::QUERY_STRING, Self::NULL).await? //must CGI1.1 4.1.7
-            }
+        info!("new request pending");
+        let _permit = self.sem.clone().acquire_owned().await.map_err(|_e|IoError::new(ErrorKind::WouldBlock,""))?;
+        let meta = FCGIRequest {
+            buf: BufList::new(),
+            waker: None,
+            ended: false,
+            _permit
+        };
         
-            kvw.add_kv(Self::REQUEST_METHOD, req.method().as_str().as_bytes()).await?; //must CGI1.1 4.1.12
-            
-            let (len, body) = {
-                let (parts, body) = req.into_parts();
-                let headers = parts.headers;
+        info!("wait for lock");
+        let mut mut_inner = self.inner.lock().await;
 
-                if let Some(value) = headers.get(CONTENT_TYPE) { //if client CGI1.1 4.1.3.
-                    kvw.add_kv(
-                            Self::CONTENT_TYPE,
-                            value.as_bytes()
-                        ).await?;
-                }
-                
-                let len: Option<usize> = if let Some(value) = headers.get(CONTENT_LENGTH) { //if body CGI1.1 4.1.2.
-                    kvw.add_kv(
-                            Self::CONTENT_LENGTH,
-                            value.as_bytes()
-                        ).await?;
-                    Some(value.to_str().ok()
-                        .and_then(|s|s.parse().ok())
-                        .unwrap_or(0))
-                }else{
-                    None
-                };
-                let skip = [AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE];
-                //append all HTTP headers
-                for key in headers.keys() {
-                    if skip.iter().find(|x| x == key).is_some() { //CGI1.1 4.1.18.
-                        continue;
-                    }
-                    /*rfc3875
-                    The HTTP header field name is converted to upper case, has all
-                    occurrences of "-" replaced with "_" and has "HTTP_" prepended to
-                    give the meta-variable name.
-                    */
-                    let mut k = BytesMut::with_capacity(key.as_str().len()+5);
-                    k.put(&b"HTTP_"[..]);
-                    for &c in key.as_str().as_bytes() {
-                        let upper = match c {
-                            b'-' => b'_',
-                            lower_acii if b'a' <= lower_acii && lower_acii <= b'z' => lower_acii - (b'a'-b'A'), //a ... z
-                            s => s
-                        };
-                        k.put_u8(upper);
-                    }
-                    /*rfc3875
-                    If multiple header fields with the same field-name
-                    are received then the server MUST rewrite them as a single value
-                    having the same semantics.  Similarly, a header field that spans
-                    multiple lines MUST be merged onto a single line.
-
-                    RFC 7230, Section 3.2.2, Field Order: Set-Cookie is special
-                    -> but not part of a request
-
-                    RFC 7230, Section 3.2.4, Field Parsing: multiline header -> 400/502
-                    */
-                    let mut value_buf;
-                    let value = match self.header_mul {
-                        MultiHeaderStrategy::Combine => {
-                            value_buf = BytesMut::with_capacity(512);
-                            let mut first = false;
-                            for v in headers.get_all(key).iter() {
-                                if !first {
-                                    first = true;
-                                }else{
-                                    value_buf.put_u8(b',');
-                                }
-                                let v = v.as_bytes();
-                                value_buf.put_slice(v);//copy
-                            }
-                            value_buf.as_ref()
-                        },
-                        MultiHeaderStrategy::OnlyFirst => {
-                            match headers.get(key) {
-                                Some(v) => v.as_bytes(),
-                                None => Self::NULL
-                            }
-                        },
-                        MultiHeaderStrategy::OnlyLast => {
-                            match headers.get_all(key).iter().next_back() {
-                                Some(v) => v.as_bytes(),
-                                None => Self::NULL
-                            }
-                            
-                        }
-                    };
-                    if let HeaderMultilineStrategy::ReturnError = self.header_nl {
-                        if value.as_ref().contains(&b'\n') {
-                            return Err(IoError::new(ErrorKind::InvalidData,"multiline headers are not allowed"));
-                        }
-                    }
-                    kvw.add_kv(k, value).await?;
-                }
-                //send all headers to the FCGI App
-                kvw.flush().await?;
-                (len, body)
-            };
-            //mut_inner.io.encode(params).await?;
-            trace!("sent header");
-            //Note: Responses might arrive from this point on
-
-            // FIXME stdin after end!!!!!!!
-
-            //send the body to the FCGI App
-            if let Some(len) = len {
-                //CGI1.1 4.2 -> at least content-length data
-                mut_inner.io.data_stream(body,
-                    rid, 
-                    fastcgi::Record::STDIN,
-                    len).await?;
-            }else{
-                mut_inner.io.encode(FCGIType::STDIN {
-                    request_id: rid,
-                    data: Bytes::new()}).await?;
+        if mut_inner.check_alive().await?==false {
+            // we need to connect again
+            info!("reconnect...");
+            if let Err(e) = mut_inner.io.shutdown().await {
+                error!("shutdown old con: {}", e);
             }
-            //empty record to end STDIN steam FCGI1.0
-            debug!("sent req body");
+            mut_inner.notify_everyone();
+            mut_inner.io = FCGIWriter::new(BufReader::new(Stream::connect(&self.addr).await?));
+            mut_inner.fcgi_parser = fastcgi::RecordReader::new();
+            info!("reconnected");
         }
-        //free mutex
 
+        let rid = (mut_inner.running_requests.insert(meta)+1) as u16;
+        info!("started req #{}", rid);
+        //entry.insert(meta);
+
+        let br = FCGIType::BeginRequest{
+            request_id: rid,
+            role: fastcgi::BeginRequestBody::RESPONDER,
+            flags: fastcgi::BeginRequestBody::KEEP_CONN
+        };
+        mut_inner.io.encode(br).await?;
+        //Prepare the CGI headers
+        let mut kvw = mut_inner.io.kv_stream(rid,
+            fastcgi::Record::PARAMS);
+
+        kvw.extend(dyn_headers).await?;
+
+        match req.uri().query(){
+            Some(query) => kvw.add_kv(Self::QUERY_STRING, query.as_bytes()).await?, //must CGI1.1 4.1.7
+            None => kvw.add_kv(Self::QUERY_STRING, Self::NULL).await? //must CGI1.1 4.1.7
+        }
+    
+        kvw.add_kv(Self::REQUEST_METHOD, req.method().as_str().as_bytes()).await?; //must CGI1.1 4.1.12
+        
+        let (len, body) = {
+            let (parts, body) = req.into_parts();
+            let headers = parts.headers;
+
+            if let Some(value) = headers.get(CONTENT_TYPE) { //if client CGI1.1 4.1.3.
+                kvw.add_kv(
+                        Self::CONTENT_TYPE,
+                        value.as_bytes()
+                    ).await?;
+            }
+            
+            let len: Option<usize> = if let Some(value) = headers.get(CONTENT_LENGTH) { //if body CGI1.1 4.1.2.
+                kvw.add_kv(
+                        Self::CONTENT_LENGTH,
+                        value.as_bytes()
+                    ).await?;
+                Some(value.to_str().ok()
+                    .and_then(|s|s.parse().ok())
+                    .unwrap_or(0))
+            }else{
+                None
+            };
+            let skip = [AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE];
+            //append all HTTP headers
+            for key in headers.keys() {
+                if skip.iter().find(|x| x == key).is_some() { //CGI1.1 4.1.18.
+                    continue;
+                }
+                /*rfc3875
+                The HTTP header field name is converted to upper case, has all
+                occurrences of "-" replaced with "_" and has "HTTP_" prepended to
+                give the meta-variable name.
+                */
+                let mut k = BytesMut::with_capacity(key.as_str().len()+5);
+                k.put(&b"HTTP_"[..]);
+                for &c in key.as_str().as_bytes() {
+                    let upper = match c {
+                        b'-' => b'_',
+                        lower_acii if b'a' <= lower_acii && lower_acii <= b'z' => lower_acii - (b'a'-b'A'), //a ... z
+                        s => s
+                    };
+                    k.put_u8(upper);
+                }
+                /*rfc3875
+                If multiple header fields with the same field-name
+                are received then the server MUST rewrite them as a single value
+                having the same semantics.  Similarly, a header field that spans
+                multiple lines MUST be merged onto a single line.
+
+                RFC 7230, Section 3.2.2, Field Order: Set-Cookie is special
+                -> but not part of a request
+
+                RFC 7230, Section 3.2.4, Field Parsing: multiline header -> 400/502
+                */
+                let mut value_buf;
+                let value = match self.header_mul {
+                    MultiHeaderStrategy::Combine => {
+                        value_buf = BytesMut::with_capacity(512);
+                        let mut first = false;
+                        for v in headers.get_all(key).iter() {
+                            if !first {
+                                first = true;
+                            }else{
+                                value_buf.put_u8(b',');
+                            }
+                            let v = v.as_bytes();
+                            value_buf.put_slice(v);//copy
+                        }
+                        value_buf.as_ref()
+                    },
+                    MultiHeaderStrategy::OnlyFirst => {
+                        match headers.get(key) {
+                            Some(v) => v.as_bytes(),
+                            None => Self::NULL
+                        }
+                    },
+                    MultiHeaderStrategy::OnlyLast => {
+                        match headers.get_all(key).iter().next_back() {
+                            Some(v) => v.as_bytes(),
+                            None => Self::NULL
+                        }
+                        
+                    }
+                };
+                if let HeaderMultilineStrategy::ReturnError = self.header_nl {
+                    if value.as_ref().contains(&b'\n') {
+                        return Err(IoError::new(ErrorKind::InvalidData,"multiline headers are not allowed"));
+                    }
+                }
+                kvw.add_kv(k, value).await?;
+            }
+            //send all headers to the FCGI App
+            kvw.flush().await?;
+            (len, body)
+        };
+        //mut_inner.io.encode(params).await?;
+        trace!("sent header");
+        //Note: Responses might arrive from this point on
+
+        if let Some(len) = len {
+            drop(mut_inner); // close mutex before create_response or/and send_body
+            // send the body to the FCGI App
+            // and read responses
+            let (_, res) = tokio::try_join!(
+                self.send_body(rid, len, body),
+                self.create_response(rid))?;
+            Ok(res)
+        }else{
+            //send end of STDIN
+            mut_inner.io.flush_data_chunk(
+                Self::NULL,
+                rid, 
+                fastcgi::Record::STDIN).await?;
+            drop(mut_inner); // close mutex before create_response
+            self.create_response(rid).await
+        }        
+    }
+    /// send the body to the FCGI App as STDIN
+    async fn send_body<B>(&self, request_id: u16, mut len: usize, mut body: B)
+        -> Result<(), IoError>
+        where B: Body+Unpin
+    {
+        //stream as body comes in
+        while let Some(chunk) = body.data().await {
+            if let Ok(data) = chunk {
+                let s = data.remaining();
+                debug!("sent {} body bytes to app", s );
+                if s==0 { continue; }
+                len -= s;
+                self.inner.lock().await.io.flush_data_chunk(
+                    data,
+                    request_id, 
+                    fastcgi::Record::STDIN).await?;
+            }
+        }
+        //CGI1.1 4.2 -> at least content-length data
+        if len > 0 {
+            let a = FCGIType::AbortRequest { request_id };
+            self.inner.lock().await.io.encode(a).await?;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted, 
+                "body too short"));
+        }
+        //empty record to end STDIN steam FCGI1.0
+        self.inner.lock().await.io.flush_data_chunk(
+            Self::NULL,
+            request_id, 
+            fastcgi::Record::STDIN).await?;
+
+        debug!("sent req body");
+        Ok(())
+    }
+    /// Poll the STDOUT response of the FCGI Server
+    /// Parse the Headers and return a body that streams the rest
+    async fn create_response(&self, rid: u16)
+        -> Result<Response<impl Body<Data = Bytes,Error = IoError>>, IoError>
+    {
         let mut fcgibody = FCGIBody
         {
             con: Arc::clone(&self.inner),
@@ -771,8 +808,8 @@ mod tests {
             trace!("new req obj");
             let mut params = HashMap::new();
             params.insert(
-                Bytes::from(&b"SCRIPT_FILENAME"[..]),
-                Bytes::from(&b"/home/daniel/Public/test.php"[..]),
+                &b"SCRIPT_FILENAME"[..],
+                &b"/home/daniel/Public/test.php"[..],
             );
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
@@ -908,8 +945,8 @@ mod tests {
             trace!("new req obj");
             let mut params = HashMap::new();
             params.insert(
-                Bytes::from(&b"SCRIPT_FILENAME"[..]),
-                Bytes::from(&b"/home/daniel/Public/test.php"[..]),
+                &b"SCRIPT_FILENAME"[..],
+                &b"/home/daniel/Public/test.php"[..],
             );
             let mut res = fcgi_con.forward(req,params).await.expect("forward failed");
             trace!("got res obj");
