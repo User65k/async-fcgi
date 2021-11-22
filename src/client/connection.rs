@@ -239,7 +239,6 @@ impl Connection
     
         kvw.add_kv(Self::REQUEST_METHOD, req.method().as_str().as_bytes()).await?; //must CGI1.1 4.1.12
         
-        let (len, body) = {
             let (parts, body) = req.into_parts();
             let headers = parts.headers;
 
@@ -325,6 +324,9 @@ impl Connection
                 };
                 if let HeaderMultilineStrategy::ReturnError = self.header_nl {
                     if value.as_ref().contains(&b'\n') {
+                        drop(kvw);//stop mid stream
+                        drop(mut_inner);//free mutex
+                        self.abort(rid).await?;//abort request
                         return Err(IoError::new(ErrorKind::InvalidData,"multiline headers are not allowed"));
                     }
                 }
@@ -332,9 +334,6 @@ impl Connection
             }
             //send all headers to the FCGI App
             kvw.flush().await?;
-            (len, body)
-        };
-        //mut_inner.io.encode(params).await?;
         trace!("sent header");
         //Note: Responses might arrive from this point on
 
@@ -376,8 +375,7 @@ impl Connection
         }
         //CGI1.1 4.2 -> at least content-length data
         if len > 0 {
-            let a = FCGIType::AbortRequest { request_id };
-            self.inner.lock().await.io.encode(a).await?;
+            self.abort(request_id).await?;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted, 
                 "body too short"));
@@ -390,6 +388,10 @@ impl Connection
 
         debug!("sent req body");
         Ok(())
+    }
+    async fn abort(&self, request_id: u16) -> Result<(),IoError> {
+        let a = FCGIType::AbortRequest { request_id };
+        self.inner.lock().await.io.encode(a).await
     }
     /// Poll the STDOUT response of the FCGI Server
     /// Parse the Headers and return a body that streams the rest
@@ -777,9 +779,18 @@ mod tests {
             Poll::Ready(Ok(None))
         }
     }
+    fn init_log() {
+        let mut builder = pretty_env_logger::formatted_timed_builder();
+        builder.is_test(true);
+        if let Ok(s) = ::std::env::var("RUST_LOG") {
+            builder.parse_filters(&s);
+        }
+        let _ = builder.try_init();
+    }
 
     #[test]
     fn simple_get() {
+        init_log();
             // Create the runtime
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         async fn mock_app(app_listener: TcpListener) {
@@ -831,6 +842,7 @@ mod tests {
     }
     #[test]
     fn app_answer_split_mid_record() { //flup did this once
+        init_log();
         // Create the runtime
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         async fn mock_app(app_listener: TcpListener) {
@@ -873,6 +885,7 @@ mod tests {
 
     #[test]
     fn app_http_headers_split() {
+        init_log();
         // Create the runtime
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         async fn mock_app(app_listener: TcpListener) {
@@ -914,8 +927,7 @@ mod tests {
     }
     #[test]
     fn simple_post() {
-        extern crate pretty_env_logger;
-        pretty_env_logger::init();
+        init_log();
             // Create the runtime
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         async fn mock_app(app_listener: TcpListener) {
