@@ -1,8 +1,8 @@
 /*! Contains constants and models for fcgi data records.
 ```
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
     use async_fcgi::fastcgi::*;
-    let mut b = BufList::new();
+    let mut b = BytesMut::with_capacity(96);
     BeginRequestBody::new(BeginRequestBody::RESPONDER,0,1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(Bytes::from(&b"SCRIPT_FILENAME"[..]),Bytes::from(&b"/home/daniel/Public/test.php"[..]))).expect("record full");
@@ -12,6 +12,7 @@
 */
 use bytes::{Bytes, BytesMut, BufMut, Buf};
 use crate::bufvec::BufList;
+#[cfg(feature = "web_server")]
 use log::{debug, trace};
 use std::iter::{FromIterator, Extend, IntoIterator};
 
@@ -40,7 +41,7 @@ pub struct EndRequestBody
 }
 pub struct UnknownTypeBody
 {
-    rtype: u8,
+    pub rtype: u8,
 //    pub reserved: [u8; 7],
 }
 
@@ -94,9 +95,10 @@ impl Body {
 }
 
 impl Header {
-        /// Number of bytes in a Header.
+    /// Number of bytes in a Header.
     ///
     /// Future versions of the protocol will not reduce this number.
+    #[cfg(feature = "codec")]
     pub const HEADER_LEN: usize = 8;
 
     /// version component of Header
@@ -162,6 +164,7 @@ impl Record {
     /// type component of Header
     ///
     /// Unrecognized management record
+    #[cfg(feature = "web_server")]
     const UNKNOWN_TYPE: u8 = 11;
 }
 impl BeginRequestBody {
@@ -316,6 +319,7 @@ impl Header {
         data.put_u8(0); // reserved
         //debug!("h {} {} -> {:?}",self.request_id, self.content_length, &data);
     }
+    #[cfg(feature = "web_server")]
     fn parse(data: &mut Bytes) -> Header
     {
         let h = Header {
@@ -329,6 +333,7 @@ impl Header {
         h
     }
     #[inline]
+    #[cfg(feature = "codec")]
     pub fn get_padding(&self) -> u8
     {
         self.padding_length
@@ -357,9 +362,11 @@ impl BeginRequestBody
 }
 /// to get a sream of records from a stream of bytes
 /// a record does not need to be completely available
+#[cfg(feature = "web_server")]
 pub(crate) struct RecordReader {
     current: Option<Header>
 }
+#[cfg(feature = "web_server")]
 impl RecordReader
 {
     pub(crate) fn new() -> RecordReader {
@@ -430,11 +437,13 @@ impl RecordReader
 }
 impl Record
 {
+    #[cfg(feature = "web_server")]
     pub(crate) fn get_request_id(&self) -> u16 {
         self.header.request_id
     }
     /// parse bytes to a single record
     /// returns `Ǹone` and leaves data untouched if not enough data is available
+    #[cfg(feature = "con_pool")]
     pub(crate) fn read(data: &mut Bytes) -> Option<Record>
     {
         //dont alter data until we have a whole packet to read
@@ -457,6 +466,7 @@ impl Record
             body
         })
     }
+    #[cfg(feature = "web_server")]
     fn parse_body(mut payload: Bytes, ptype: u8) -> Body {
         match ptype {
             Record::STDOUT => Body::StdOut(payload),
@@ -475,21 +485,8 @@ impl Record
             _ => panic!("not impl"),
         }
     }
-    ///create a record of type ABORT_REQUEST
-    pub(crate) fn abort(request_id: u16) -> Record {
-        Record {
-            header: Header {
-                version: Header::VERSION_1,
-                rtype: Record::ABORT_REQUEST,
-                request_id,
-                content_length: 0,
-                padding_length: 0,
-            },
-            body: Body::Abort
-        }
-    }
-    ///serialize this record and append it to buf
-    pub(crate) fn append<BM: BufMut>(self, buf: &mut BM)
+    ///serialize this record and append it to buf - used by tests
+    pub fn append<BM: BufMut>(self, buf: &mut BM)
     {
         match self.body
         {
@@ -602,6 +599,7 @@ impl NVBody
         }
         Ok(())
     }
+    #[cfg(feature = "web_server")]
     pub(crate) fn from_bytes(buf: Bytes) -> NVBody {
         let mut b = NVBody::new();
         b.len = buf.remaining() as u16;
@@ -649,11 +647,6 @@ impl NVBodyList{
         }
         nv.add(pair).expect("KVPair bigger that 0xFFFF");
     }
-    pub(crate) fn append_records<BM: BufMut>(self, rtype: u8, request_id: u16, wbuf: &mut BM) {
-        for nvbod in self.bodies {
-            nvbod.to_record(rtype, request_id).append(wbuf);
-        }
-    }
 }
 
 impl FromIterator<(Bytes, Bytes)> for NVBodyList
@@ -688,6 +681,7 @@ impl BeginRequestBody
 
 impl EndRequestBody
 {
+    #[cfg(feature = "web_server")]
     fn parse(mut data: Bytes) -> EndRequestBody
     {
         let b = EndRequestBody {

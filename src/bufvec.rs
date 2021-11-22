@@ -17,15 +17,7 @@ impl<T: Buf> BufList<T> {
         debug_assert!(buf.has_remaining());
         self.bufs.push_back(buf);
     }
-/*
-    #[inline]
-    pub(crate) fn bufs_cnt(&self) -> usize {
-        self.bufs.len()
-    }*/
-    #[inline]
-    pub(crate) fn append(&mut self, mut other: BufList<T>) {
-        self.bufs.append(&mut other.bufs)
-    }
+    #[cfg(feature = "web_server")]
     #[inline]
     pub(crate) fn oldest(&mut self) -> Option<T> {
         self.bufs.pop_front()

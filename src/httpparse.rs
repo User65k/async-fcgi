@@ -47,11 +47,8 @@ pub (crate) fn parse(mut bytes: Bytes, header_map: &mut HeaderMap) -> ParseResul
 #[test]
 fn test_parse(){
     use bytes::Bytes;
-    use httparse::parse_headers;
-    const MAX_HEADERS: usize = 100;
-    let mut headers: [httparse::Header<'_>; MAX_HEADERS] = unsafe { mem::uninitialized() };
     let buf = b"Status: 202 Not Found\r\nX-Powered-By: PHP/7.3.16\r\nX-Authenticate: NTLM\r\nContent-type: text/html; charset=UTF-8\r\n\r\n<html><body>\npub\n<pre>Array\n(\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [lol] => 1\n)\nArray\n(\n    [HTTP_accept] => text/html\n    [REQUEST_METHOD] => GET\n    [QUERY_STRING] => lol=1\n    [SCRIPT_NAME] => /test\n    [SCRIPT_FILENAME] => /home/daniel/Public/test.php\n    [FCGI_ROLE] => RESPONDER\n    [PHP_SELF] => /test\n    [REQUEST_TIME_FLOAT] => 1587740954.2741\n    [REQUEST_TIME] => 1587740954\n)\n";
-    let mut bytes = Bytes::from(&buf[..]);
+    let bytes = Bytes::from(&buf[..]);
     let mut map = HeaderMap::new();
     if let ParseResult::Ok(body) = parse(bytes.clone(), &mut map) {
         assert_eq!(body, bytes.slice(113..));
