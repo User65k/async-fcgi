@@ -36,8 +36,7 @@ impl <RW: AsyncRead+AsyncWrite+Unpin>FCGIWriter<RW> {
 }
 
 
-const HEADER_LEN: usize = 8;
-//buffer at max one record without padding, plus a header
+///data buffer - at max one record without padding, plus a header
 const BUF_LEN: usize = 0xFF_FF-7+8;
 
 impl <R: AsyncRead+Unpin>AsyncRead for FCGIWriter<R> {
@@ -142,15 +141,14 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
         where B: Buf {
         while buf.len()+val.remaining() > BUF_LEN {
             let mut part = val.take(BUF_LEN - buf.len());
-            Header::new(rtype,request_id, (BUF_LEN-HEADER_LEN) as u16)
-                .write_into(&mut &mut buf[0..HEADER_LEN]);
+            Header::new(rtype,request_id, (BUF_LEN-Header::HEADER_LEN) as u16)
+                .write_into(&mut &mut buf[0..Header::HEADER_LEN]);
 
             self.write_whole_buf(buf).await?;
             self.write_whole_buf(&mut part).await?;
             val = part.into_inner();
             
-            buf.clear();
-            buf.put_slice(&[0;8]);//reserve space for header
+            unsafe { buf.set_len(Header::HEADER_LEN); } //clear + reserve space for header
         }
         buf.put(val);
         Ok(())
@@ -158,12 +156,12 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
     /// write buf and padding and append an emty header to indicate the steams end
     #[inline]
     async fn end_stream(&mut self, mut buf: BytesMut, request_id: u16, rtype: u8) -> std::io::Result<()> {
-        if buf.len()-HEADER_LEN > 0 {
+        if buf.len()-Header::HEADER_LEN > 0 {
             //write whats left
             let last_head = Header::new(rtype,request_id,
-                (buf.len()-HEADER_LEN) as u16);
+                (buf.len()-Header::HEADER_LEN) as u16);
             let pad = last_head.get_padding() as usize;
-            last_head.write_into(&mut &mut buf[0..HEADER_LEN]);
+            last_head.write_into(&mut &mut buf[0..Header::HEADER_LEN]);
             let mut buf = buf.freeze();
             trace!("..with header: {:?}", buf);
             let mut pad = buf.slice(0..pad);
@@ -172,7 +170,7 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
             self.write_whole_buf(&mut pad).await?;
         }
         //empty record
-        let mut end = BytesMut::with_capacity(HEADER_LEN);
+        let mut end = BytesMut::with_capacity(Header::HEADER_LEN);
         Header::new(rtype,request_id,0).write_into(&mut end);
         self.write_whole_buf(&mut end).await?;
         Ok(())
@@ -180,7 +178,7 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
     /// write `data` to the stream.
     async fn encode_data(&mut self, request_id: u16, rtype: u8, mut data: Bytes) -> std::io::Result<()> {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
-        buf.put_slice(&[0;8]);//reserve space for header
+        unsafe { buf.set_len(Header::HEADER_LEN); }//reserve space for header
         self.append_to_stream(&mut data, &mut buf,request_id, rtype).await?;
         self.end_stream(buf,request_id, rtype).await?;
         Ok(())
@@ -190,7 +188,7 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
     pub async fn data_stream<B>(&mut self, mut body: B, request_id: u16, rtype: u8, mut len: usize) -> std::io::Result<()>
     where B: Body+Unpin {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
-        buf.put_slice(&[0;8]);//reserve space for header
+        unsafe { buf.set_len(Header::HEADER_LEN); } //reserve space for header
         while let Some(chunk) = body.data().await {
             if let Ok(mut b) = chunk { //b: Buf
                 let val = b.copy_to_bytes(b.remaining());
@@ -216,10 +214,10 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
     /// do not end the data stream
     pub async fn flush_data_chunk<B>(&mut self, mut data: B, request_id: u16, rtype: u8) -> std::io::Result<()>
     where B: Buf {
-        let mut header = BytesMut::with_capacity(HEADER_LEN);
-        while data.remaining() > BUF_LEN - HEADER_LEN {
-            let mut part = data.take(BUF_LEN - HEADER_LEN);
-            Header::new(rtype,request_id, (BUF_LEN-HEADER_LEN) as u16)
+        let mut header = BytesMut::with_capacity(Header::HEADER_LEN);
+        while data.remaining() > BUF_LEN - Header::HEADER_LEN {
+            let mut part = data.take(BUF_LEN - Header::HEADER_LEN);
+            Header::new(rtype,request_id, (BUF_LEN-Header::HEADER_LEN) as u16)
                 .write_into(&mut header);
 
             self.write_whole_buf(&mut header).await?;
@@ -244,14 +242,19 @@ impl <W: AsyncWrite+Unpin>FCGIWriter<W> {
     }
     /// Create a NameValuePairWriter for this stream in order to write key value pairs (like PARAMS).
     /// ```
-    /// let mut kvw = fcgi_writer.kv_stream(1, fastcgi::Record::PARAMS);
-    /// kvw.add_kv(b"QUERY_STRING", b"").await?;
-    /// kvw.flush().await?;
+    /// use tokio::io::AsyncWrite;
+    /// use async_fcgi::{fastcgi::Record, codec::FCGIWriter};
+    /// async fn write_params<W: AsyncWrite+Unpin>(fcgi_writer: &mut FCGIWriter<W>) -> std::io::Result<()> {
+    ///     let mut kvw = fcgi_writer.kv_stream(1, Record::PARAMS);
+    ///     kvw.add_kv(&b"QUERY_STRING"[..], &b""[..]).await?;
+    ///     kvw.flush().await?;
+    ///     Ok(())
+    /// }
     /// ```
     /// See `encode_kvp`
     pub fn kv_stream(&mut self, request_id: u16, rtype: u8) -> NameValuePairWriter<W> {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
-        buf.put_slice(&[0;8]);//reserve space for header
+        unsafe { buf.set_len(Header::HEADER_LEN); } //clear + reserve space for header
         NameValuePairWriter {
             w: self,
             request_id,
@@ -317,44 +320,26 @@ impl <R: AsyncWrite+Unpin>NameValuePairWriter<'_, R> {
         where B1: Buf, B2: Buf {
         let mut ln = name.remaining();
         let mut lv = val.remaining();
-        let mut lf: usize = 2;
+        let mut blen = BytesMut::with_capacity(8);
         if ln > 0x7f {
             if ln > 0x7fffffff {
                 panic!();
             }
-            lf +=3;
             ln |= 0x8000;
+            blen.put_u32(ln as u32);
+        }else{
+            blen.put_u8(ln as u8);
         }
         if lv > 0x7f {
             if lv > 0x7fffffff {
                 panic!();
             }
-            lf +=3;
             lv |= 0x8000;
-        }
-        // check if size info fits into buf
-        if self.buf.len() + lf > BUF_LEN {
-            //No -> write buf with a header
-            Header::new(self.rtype,
-                self.request_id,
-                (self.buf.len()-HEADER_LEN) as u16)
-                .write_into(&mut &mut self.buf[0..HEADER_LEN]);
-
-            self.w.write_whole_buf(&mut self.buf).await?;
-            self.buf.clear();
-            self.buf.put_slice(&[0;8]);//reserve space for header
-        }
-
-        if ln > 0x7f {
-            self.buf.put_u32(ln as u32);
+            blen.put_u32(lv as u32);
         }else{
-            self.buf.put_u8(ln as u8);
+            blen.put_u8(lv as u8);
         }
-        if lv > 0x7f {
-            self.buf.put_u32(lv as u32);
-        }else{
-            self.buf.put_u8(lv as u8);
-        }
+        self.w.append_to_stream(&mut blen, &mut self.buf,self.request_id, self.rtype).await?;
         
         self.w.append_to_stream(&mut name, &mut self.buf,self.request_id, self.rtype).await?;
 
