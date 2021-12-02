@@ -747,7 +747,7 @@ mod tests {
     use super::*;
     use tokio::{io::{AsyncReadExt, AsyncWriteExt}, runtime::Builder, net::TcpListener};
     use std::collections::{VecDeque,HashMap};
-    use std::net::SocketAddr;
+    use crate::stream::tests::local_socket_pair;
 
     struct TestBod{
         l: VecDeque<Bytes>
@@ -806,11 +806,10 @@ mod tests {
         }
         
         async fn con() {
-            let a: SocketAddr = "127.0.0.1:59000".parse().unwrap();
-            let app_listener = TcpListener::bind(a).await.unwrap();
+            let (app_listener, a) = local_socket_pair().await.unwrap();
             let m = tokio::spawn(mock_app(app_listener));
 
-            let fcgi_con = Connection::connect(&"127.0.0.1:59000".parse().unwrap(), 1).await.unwrap();
+            let fcgi_con = Connection::connect(&a, 1).await.unwrap();
             trace!("new connection obj");
             let b = TestBod{
                 l: VecDeque::new()
@@ -856,11 +855,10 @@ mod tests {
         }
 
         async fn con() {            
-            let a: SocketAddr = "127.0.0.1:59001".parse().unwrap();
-            let app_listener = TcpListener::bind(a).await.unwrap();
+            let (app_listener, a) = local_socket_pair().await.unwrap();
             let m = tokio::spawn(mock_app(app_listener));
 
-            let fcgi_con = Connection::connect(&"127.0.0.1:59001".parse().unwrap(), 1).await.unwrap();
+            let fcgi_con = Connection::connect(&a, 1).await.unwrap();
             trace!("new connection obj");
             let b = TestBod{
                 l: VecDeque::new()
@@ -901,11 +899,10 @@ mod tests {
         }
 
         async fn con() {
-            let a: SocketAddr = "127.0.0.1:59002".parse().unwrap();
-            let app_listener = TcpListener::bind(a).await.unwrap();
+            let (app_listener, a) = local_socket_pair().await.unwrap();
             let m = tokio::spawn(mock_app(app_listener));
 
-            let fcgi_con = Connection::connect(&"127.0.0.1:59002".parse().unwrap(), 1).await.unwrap();
+            let fcgi_con = Connection::connect(&a, 1).await.unwrap();
             trace!("new connection obj");
             let b = TestBod{
                 l: VecDeque::new()
@@ -943,11 +940,10 @@ mod tests {
         }
         
         async fn con() {
-            let a: SocketAddr = "127.0.0.1:59003".parse().unwrap();
-            let app_listener = TcpListener::bind(a).await.unwrap();
+            let (app_listener, a) = local_socket_pair().await.unwrap();
             let m = tokio::spawn(mock_app(app_listener));
 
-            let fcgi_con = Connection::connect(&"127.0.0.1:59003".parse().unwrap(), 1).await.unwrap();
+            let fcgi_con = Connection::connect(&a, 1).await.unwrap();
             trace!("new connection obj");
             let mut l = VecDeque::new();
             l.push_back(Bytes::from(&"test=123"[..]));

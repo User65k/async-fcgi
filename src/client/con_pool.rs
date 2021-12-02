@@ -182,6 +182,7 @@ mod tests {
     use std::iter::FromIterator;
     use tokio::io::AsyncWriteExt;
     use std::collections::HashMap;
+    use crate::stream::tests::local_socket_pair;
 
     #[cfg(feature = "app_start")]
     #[test]
@@ -208,7 +209,6 @@ mod tests {
         //extern crate pretty_env_logger;
         //pretty_env_logger::init();
         use tokio::net::TcpListener;
-        use std::net::SocketAddr;
         // Create the runtime
         let rt = Builder::new_current_thread().enable_all().build().unwrap();
         async fn mock_app(app_listener: TcpListener) {
@@ -246,8 +246,7 @@ mod tests {
         }
 
         async fn con() {
-            let a: SocketAddr = "127.0.0.1:59876".parse().unwrap();
-            let app_listener = TcpListener::bind(a).await.unwrap();
+            let (app_listener, a) = local_socket_pair().await.unwrap();
             info!("bound");
             let m = tokio::spawn(async move {
                 let a = a.into();

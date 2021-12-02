@@ -230,7 +230,7 @@ impl Drop for Listener {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use tokio::runtime::Builder;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -239,6 +239,13 @@ mod tests {
     use tokio::net::TcpListener;
     #[cfg(unix)]
     use tokio::net::UnixListener;
+
+    pub(crate) async fn local_socket_pair() -> Result<(TcpListener, FCGIAddr),std::io::Error> {
+        let a: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let app_listener = TcpListener::bind(a).await?;
+        let a: FCGIAddr = app_listener.local_addr()?.into();
+        Ok((app_listener, a))
+    }
 
     #[test]
     fn tcp_connect() {
@@ -251,11 +258,9 @@ mod tests {
         }
 
         async fn con() {
-            let a: SocketAddr = "127.0.0.1:59003".parse().unwrap();
-            let app_listener = TcpListener::bind(a).await.unwrap();
+            let (app_listener, a) = local_socket_pair().await.unwrap();
             tokio::spawn(mock_app(app_listener));
 
-            let a: FCGIAddr = "127.0.0.1:59003".parse().expect("tcp parse failed");
             let mut s = Stream::connect(&a).await.expect("tcp connect failed");
 
             let data = b"1234";
