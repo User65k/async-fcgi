@@ -207,17 +207,17 @@ impl EndRequestBody {
 /// Names for GET_VALUES / GET_VALUES_RESULT records.
 ///
 /// The maximum number of concurrent transport connections this application will accept, e.g. "1" or "10".
-pub const MAX_CONNS: &'static [u8] = b"MAX_CONNS";
+pub const MAX_CONNS: &[u8] = b"MAX_CONNS";
 
 /// Names for GET_VALUES / GET_VALUES_RESULT records.
 ///
 /// The maximum number of concurrent requests this application will accept, e.g. "1" or "50".
-pub const MAX_REQS: &'static [u8] = b"MAX_REQS";
+pub const MAX_REQS: &[u8] = b"MAX_REQS";
 
 /// Names for GET_VALUES / GET_VALUES_RESULT records.
 ///
 /// If this application does not multiplex connections (i.e. handle concurrent requests over each connection), "1" otherwise.
-pub const MPXS_CONNS: &'static [u8] = b"MPXS_CONNS";
+pub const MPXS_CONNS: &[u8] = b"MPXS_CONNS";
 
 
 
@@ -246,8 +246,8 @@ impl NameValuePair
     pub fn new(name_data: Bytes, value_data: Bytes) -> NameValuePair
     {
         NameValuePair {
-            name_data: name_data,
-            value_data: value_data
+            name_data,
+            value_data
         }
     }
     
