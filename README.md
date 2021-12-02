@@ -2,6 +2,7 @@
 [![crates.io](https://img.shields.io/crates/v/async-fcgi.svg)](https://crates.io/crates/async-fcgi)
 [![Released API docs](https://docs.rs/async-fcgi/badge.svg)](https://docs.rs/async-fcgi)
 [![GitHub](https://img.shields.io/github/license/User65k/async-fcgi)](./LICENSE)
+![GitHub Workflow Status](https://img.shields.io/github/workflow/status/User65k/async-fcgi/Rust)
 
 FastCGI implementation in pure Rust.
 

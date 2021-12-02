@@ -1,0 +1,24 @@
+name: Rust
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v2
+    - name: Run tests
+      run: cargo test
+    - name: Example webserver
+      run: cargo build --example webserver --features="con_pool"
+    - name: Example start_fcgi_server_from_client
+      run: cargo build --example start_fcgi_server_from_client --features="app_start"
