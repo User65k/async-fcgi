@@ -249,16 +249,18 @@ impl Connection
                     ).await?;
             }
             
-            let len: Option<usize> = if let Some(value) = headers.get(CONTENT_LENGTH) { //if body CGI1.1 4.1.2.
+            let len: Option<usize> = if Some(0) == body.size_hint().upper() {
+                //if exact and 0 -> no body
+                None
+            }else{
+                //if exact (content len present) -> lower==upper
+                //if unknown -> at least lower, maybe 0
+                let value = body.size_hint().lower(); //if body CGI1.1 4.1.2.
                 kvw.add_kv(
                         Self::CONTENT_LENGTH,
-                        value.as_bytes()
+                        value.to_string().as_bytes()
                     ).await?;
-                Some(value.to_str().ok()
-                    .and_then(|s|s.parse().ok())
-                    .unwrap_or(0))
-            }else{
-                None
+                Some(value as usize)
             };
             let skip = [AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE];
             //append all HTTP headers
@@ -748,6 +750,7 @@ mod tests {
     use tokio::{io::{AsyncReadExt, AsyncWriteExt}, runtime::Builder, net::TcpListener};
     use std::collections::{VecDeque,HashMap};
     use crate::stream::tests::local_socket_pair;
+    use http_body::SizeHint;
 
     struct TestBod{
         l: VecDeque<Bytes>
@@ -777,6 +780,12 @@ mod tests {
         ) -> Poll<Result<Option<HeaderMap>, Self::Error>>
         {
             Poll::Ready(Ok(None))
+        }
+        fn size_hint(&self) -> SizeHint {
+            let mut sh = SizeHint::default();
+            let s : usize = self.l.iter().map(|b|b.remaining()).sum();
+            sh.set_exact(s as u64);
+            sh
         }
     }
     fn init_log() {
