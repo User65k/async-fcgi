@@ -2,7 +2,7 @@
 [![crates.io](https://img.shields.io/crates/v/async-fcgi.svg)](https://crates.io/crates/async-fcgi)
 [![Released API docs](https://docs.rs/async-fcgi/badge.svg)](https://docs.rs/async-fcgi)
 [![GitHub](https://img.shields.io/github/license/User65k/async-fcgi)](./LICENSE)
-![GitHub Workflow Status](https://img.shields.io/github/workflow/status/User65k/async-fcgi/Rust)
+![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/User65k/async-fcgi/rust.yml)
 
 FastCGI implementation in pure Rust.
 
@@ -26,7 +26,7 @@ Tested with:
 - [x] reconnect to the FCGI App if a connection is closed
 - [x] Start an FCGI server (exec + env)
 - [x] Support Key-Value Pairs bigger than maximum record size
-- [ ] "Full Duplex" connection to the FCGI Server/App (e.g stream STDIN and OUT at the same time)
+- [x] "Full Duplex" connection to the FCGI Server/App (e.g stream STDIN and OUT at the same time)
 - [ ] `con_pool` should handle more than one connection :sweat_smile: and load balance
 - [ ] A dropped `FCGIBody` should not block a RequestID and cancel the request
 - [ ] `Connection` should handle overload error from FCGI app
@@ -36,8 +36,10 @@ PullRequests are welcome BTW
 
 # Other FCGI Crates
 
-- [fastcgi-client](https://crates.io/crates/fastcgi-client): Async client
-- [fastcgi](https://crates.io/crates/fastcgi): Synchronous Server
-- [gfcgi](https://crates.io/crates/gfcgi): Only Server Side
-- [fastcgi-sdk](https://crates.io/crates/fastcgi-sdk): Binding to the FastCGI SDK
-- [fcgi](https://crates.io/crates/fcgi): Bindings
+|Crate|Description|Difference to this
+|---|---|---|
+| [fastcgi-client](https://crates.io/crates/fastcgi-client) | Async (tokio) client | Different API
+| [fastcgi](https://crates.io/crates/fastcgi) | Synchronous Server | Synchronous. Only Server/App Side
+| [fastcgi-sdk](https://crates.io/crates/fastcgi-sdk) | Bindings to the FastCGI SDK | Bindings
+| [gfcgi](https://crates.io/crates/gfcgi) | abandoned | Only Server/App Side
+| [fcgi](https://crates.io/crates/fcgi) | Bindings | yanked
