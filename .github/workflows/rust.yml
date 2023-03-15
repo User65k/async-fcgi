@@ -17,7 +17,7 @@ jobs:
     steps:
     - uses: actions/checkout@v2
     - name: Run tests
-      run: cargo test
+      run: cargo test --all-features
     - name: Example webserver
       run: cargo build --example webserver --features="con_pool"
     - name: Example start_fcgi_server_from_client
