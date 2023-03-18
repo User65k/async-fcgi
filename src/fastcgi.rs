@@ -3,7 +3,7 @@
     use bytes::{Bytes, BytesMut};
     use async_fcgi::fastcgi::*;
     let mut b = BytesMut::with_capacity(96);
-    BeginRequestBody::new(BeginRequestBody::RESPONDER,0,1).append(&mut b);
+    BeginRequestBody::new(FastCGIRole::Responder,0,1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(Bytes::from(&b"SCRIPT_FILENAME"[..]),Bytes::from(&b"/home/daniel/Public/test.php"[..]))).expect("record full");
     nv.to_record(Record::PARAMS, 1).append(&mut b);
@@ -27,7 +27,7 @@ pub(crate) struct Header {
                         //    reserved: [u8; 1],
 }
 pub struct BeginRequestBody {
-    role: u16,
+    role: FastCGIRole,
     flags: u8,
     //    reserved: [u8; 5],
 }
@@ -159,18 +159,15 @@ impl Record {
 impl BeginRequestBody {
     /// Mask for flags component of BeginRequestBody
     pub const KEEP_CONN: u8 = 1;
-
-    /// FastCGI role
+}
+/// FastCGI role
+#[repr(u16)]
+pub enum FastCGIRole {
     /// emulated CGI/1.1 program
-    pub const RESPONDER: u16 = 1;
-
-    /// FastCGI role
+    Responder = 1,
     /// authorized/unauthorized decision
-    pub const AUTHORIZER: u16 = 2;
-
-    /// FastCGI role
-    /// extra stream of data from a file
-    pub const FILTER: u16 = 3;
+    Authorizer = 2,    
+    Filter = 3
 }
 impl EndRequestBody {
     /// protocol_status component of EndRequestBody
@@ -323,7 +320,7 @@ impl Header {
 
 impl BeginRequestBody {
     /// create a record of type BeginRequest
-    pub fn new(role: u16, flags: u8, request_id: u16) -> Record {
+    pub fn new(role: FastCGIRole, flags: u8, request_id: u16) -> Record {
         Record {
             header: Header {
                 version: Header::VERSION_1,
@@ -660,7 +657,7 @@ impl std::fmt::Debug for NameValuePair {
 #[test]
 fn encode_simple_get() {
     let mut b = BytesMut::with_capacity(80);
-    BeginRequestBody::new(BeginRequestBody::RESPONDER, 0, 1).append(&mut b);
+    BeginRequestBody::new(FastCGIRole::Responder, 0, 1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(
         Bytes::from(&b"SCRIPT_FILENAME"[..]),
@@ -682,7 +679,7 @@ fn encode_simple_get() {
 #[test]
 fn encode_post() {
     let mut b = BytesMut::with_capacity(80);
-    BeginRequestBody::new(BeginRequestBody::RESPONDER, 0, 1).append(&mut b);
+    BeginRequestBody::new(FastCGIRole::Responder, 0, 1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(
         Bytes::from(&b"SCRIPT_FILENAME"[..]),

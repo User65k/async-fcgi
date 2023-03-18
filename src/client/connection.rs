@@ -274,7 +274,7 @@ impl Connection {
 
         let br = FCGIType::BeginRequest {
             request_id: rid,
-            role: fastcgi::BeginRequestBody::RESPONDER,
+            role: fastcgi::FastCGIRole::Responder,
             flags: fastcgi::BeginRequestBody::KEEP_CONN,
         };
         mut_inner.io.encode(br).await?;
@@ -795,7 +795,7 @@ impl InnerConnection {
                     }
                     fastcgi::Body::EndRequest(status) => {
                         match status.protocol_status {
-                            fastcgi::ProtoStatus::Complete => {
+                            fastcgi::EndRequestBody::REQUEST_COMPLETE => {
                                 info!("Req #{} ended with {}", req_no + 1, status.app_status)
                             }
                             //CANT_MPX_CONN => ,
