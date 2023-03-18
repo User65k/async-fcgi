@@ -33,7 +33,7 @@ hyper = {version = "0.14", features = ["http1", "server", "stream", "runtime"]} 
 # only FCGI types by default
 default = []
 
-web_server = ["slab","http-body","httparse","tokio/net","tokio/io-util","tokio/sync", "codec"]
+web_server = ["slab","http-body","httparse","tokio/net","tokio/io-util","tokio/sync", "codec","tokio/macros"]
 con_pool = ["web_server"]
 app_start = ["con_pool", "tokio/process"]
 #application = ["httparse","tokio/net"]
