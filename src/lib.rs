@@ -1,4 +1,3 @@
-
 /*! FastCGI implementation in pure Rust.
 
 Developed for [FlashRust Webserver](https://github.com/User65k/flash_rust_ws)
@@ -6,7 +5,7 @@ with focus on
 - Vectorized IO and Zero Copy
 - async IO / tokio
 - easy [HTTP](https://crates.io/crates/http) interfaces
- 
+
  The default is only to provide the FastCGI Record parsing.
  Use these features to get
  - `con_pool`: [`ConPool`] to manage a set of Connections
@@ -19,8 +18,8 @@ with focus on
 [`FCGICodec`]: ./server/struct.FCGICodec.html
 */
 
-pub mod fastcgi;
 mod bufvec;
+pub mod fastcgi;
 
 #[cfg(feature = "web_server")]
 pub mod stream;
