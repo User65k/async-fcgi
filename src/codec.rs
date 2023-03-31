@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::fastcgi::{Header, NameValuePair, Record, FastCGIRole};
+use crate::fastcgi::{Header, NameValuePair, Record, FastCGIRole, RecordType};
 #[cfg(feature = "web_server")]
 use http_body::Body;
 use log::trace;
@@ -105,7 +105,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
                 flags,
             } => {
                 let mut buf = BytesMut::with_capacity(Header::HEADER_LEN + 8);
-                Header::new(Record::BEGIN_REQUEST, request_id, 8).write_into(&mut buf);
+                Header::new(RecordType::BeginRequest, request_id, 8).write_into(&mut buf);
                 buf.put_u16(role as u16);
                 buf.put_u8(flags);
                 buf.put_slice(&[0; 5]); // reserved
@@ -113,7 +113,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
             }
             FCGIType::AbortRequest { request_id } => {
                 let mut buf = BytesMut::with_capacity(Header::HEADER_LEN);
-                Header::new(Record::ABORT_REQUEST, request_id, 0).write_into(&mut buf);
+                Header::new(RecordType::AbortRequest, request_id, 0).write_into(&mut buf);
                 self.write_whole_buf(&mut buf.freeze()).await?;
             }
             FCGIType::EndRequest {
@@ -122,7 +122,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
                 proto_status,
             } => {
                 let mut buf = BytesMut::with_capacity(Header::HEADER_LEN + 8);
-                Header::new(Record::END_REQUEST, request_id, 8).write_into(&mut buf);
+                Header::new(RecordType::EndRequest, request_id, 8).write_into(&mut buf);
 
                 buf.put_u32(app_status);
                 buf.put_u8(proto_status);
@@ -130,26 +130,26 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
                 self.write_whole_buf(&mut buf.freeze()).await?;
             }
             FCGIType::Params { request_id, p } => {
-                self.encode_kvp(request_id, Record::PARAMS, p).await?;
+                self.encode_kvp(request_id, RecordType::Params, p).await?;
             }
             FCGIType::STDIN { request_id, data } => {
-                self.encode_data(request_id, Record::STDIN, data).await?;
+                self.encode_data(request_id, RecordType::StdIn, data).await?;
             }
             FCGIType::STDOUT { request_id, data } => {
-                self.encode_data(request_id, Record::STDOUT, data).await?;
+                self.encode_data(request_id, RecordType::StdOut, data).await?;
             }
             FCGIType::STDERR { request_id, data } => {
-                self.encode_data(request_id, Record::STDERR, data).await?;
+                self.encode_data(request_id, RecordType::StdErr, data).await?;
             }
             FCGIType::DATA { request_id, data } => {
-                self.encode_data(request_id, Record::DATA, data).await?;
+                self.encode_data(request_id, RecordType::Data, data).await?;
             }
             FCGIType::GetValues { p } => {
-                self.encode_kvp(Record::MGMT_REQUEST_ID, Record::GET_VALUES, p)
+                self.encode_kvp(Record::MGMT_REQUEST_ID, RecordType::GetValues, p)
                     .await?;
             }
             FCGIType::GetValuesResult { p } => {
-                self.encode_kvp(Record::MGMT_REQUEST_ID, Record::GET_VALUES_RESULT, p)
+                self.encode_kvp(Record::MGMT_REQUEST_ID, RecordType::GetValuesResult, p)
                     .await?;
             }
         }
@@ -158,7 +158,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
     async fn encode_kvp(
         &mut self,
         request_id: u16,
-        rtype: u8,
+        rtype: RecordType,
         p: Vec<NameValuePair>,
     ) -> std::io::Result<()> {
         let mut kvps = self.kv_stream(request_id, rtype);
@@ -180,7 +180,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
         mut val: B,
         buf: &mut BytesMut,
         request_id: u16,
-        rtype: u8,
+        rtype: RecordType,
     ) -> std::io::Result<()>
     where
         B: Buf,
@@ -207,7 +207,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
         &mut self,
         mut buf: BytesMut,
         request_id: u16,
-        rtype: u8,
+        rtype: RecordType,
     ) -> std::io::Result<()> {
         if buf.len() - Header::HEADER_LEN > 0 {
             //write whats left
@@ -231,7 +231,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
     async fn encode_data(
         &mut self,
         request_id: u16,
-        rtype: u8,
+        rtype: RecordType,
         mut data: Bytes,
     ) -> std::io::Result<()> {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
@@ -249,7 +249,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
         &mut self,
         mut body: B,
         request_id: u16,
-        rtype: u8,
+        rtype: RecordType,
         mut len: usize,
     ) -> std::io::Result<()>
     where
@@ -289,7 +289,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
         &mut self,
         mut data: B,
         request_id: u16,
-        rtype: u8,
+        rtype: RecordType,
     ) -> std::io::Result<()>
     where
         B: Buf,
@@ -323,16 +323,16 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
     /// Create a NameValuePairWriter for this stream in order to write key value pairs (like PARAMS).
     /// ```
     /// use tokio::io::AsyncWrite;
-    /// use async_fcgi::{fastcgi::Record, codec::FCGIWriter};
+    /// use async_fcgi::{fastcgi::RecordType, codec::FCGIWriter};
     /// async fn write_params<W: AsyncWrite+Unpin>(fcgi_writer: &mut FCGIWriter<W>) -> std::io::Result<()> {
-    ///     let mut kvw = fcgi_writer.kv_stream(1, Record::PARAMS);
+    ///     let mut kvw = fcgi_writer.kv_stream(1, RecordType::Params);
     ///     kvw.add_kv(&b"QUERY_STRING"[..], &b""[..]).await?;
     ///     kvw.flush().await?;
     ///     Ok(())
     /// }
     /// ```
     /// See `encode_kvp`
-    pub fn kv_stream(&mut self, request_id: u16, rtype: u8) -> NameValuePairWriter<W> {
+    pub fn kv_stream(&mut self, request_id: u16, rtype: RecordType) -> NameValuePairWriter<W> {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
         unsafe {
             buf.set_len(Header::HEADER_LEN);
@@ -371,7 +371,7 @@ impl <W: AsyncRead>FCGIWriter<W> {
 pub struct NameValuePairWriter<'a, R> {
     w: &'a mut FCGIWriter<R>,
     request_id: u16,
-    rtype: u8,
+    rtype: RecordType,
     buf: BytesMut,
 }
 impl<R: AsyncWrite + Unpin> NameValuePairWriter<'_, R> {

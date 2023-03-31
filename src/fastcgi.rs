@@ -6,8 +6,8 @@
     BeginRequestBody::new(FastCGIRole::Responder,0,1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(Bytes::from(&b"SCRIPT_FILENAME"[..]),Bytes::from(&b"/home/daniel/Public/test.php"[..]))).expect("record full");
-    nv.to_record(Record::PARAMS, 1).append(&mut b);
-    NVBody::new().to_record(Record::PARAMS, 1).append(&mut b);
+    nv.to_record(RecordType::Params, 1).append(&mut b);
+    NVBody::new().to_record(RecordType::Params, 1).append(&mut b);
 ```
 */
 use crate::bufvec::BufList;
@@ -20,7 +20,7 @@ use std::{iter::{Extend, FromIterator, IntoIterator}, fmt::Display};
 #[derive(Debug, Clone)]
 pub(crate) struct Header {
     version: u8,
-    rtype: u8,
+    rtype: RecordType,
     request_id: u16, // A request ID R becomes active when the application receives a record {FCGI_BEGIN_REQUEST, R, …} and becomes inactive when the application sends a record {FCGI_END_REQUEST, R, …} to the Web server. Management records have a requestId value of zero
     content_length: u16,
     padding_length: u8, // align by 8
@@ -97,64 +97,75 @@ impl Header {
 impl Record {
     /// Default request id component of Header
     pub const MGMT_REQUEST_ID: u16 = 0;
-
-    /// type component of Header
-    /// # Request
+}
+/// rtype of Header
+#[derive(Debug, Clone, Copy)]
+#[repr(u8)]
+pub enum RecordType {
     /// The Web server sends a FCGI_BEGIN_REQUEST record to start a request
-    pub const BEGIN_REQUEST: u8 = 1;
-
-    /// type component of Header
-    /// # Request
+    BeginRequest = 1,
     /// A Web server aborts a FastCGI request when an HTTP client closes its transport connection while the FastCGI request is running on behalf of that client
-    pub const ABORT_REQUEST: u8 = 2;
-
-    /// type component of Header
-    /// # Response
+    AbortRequest = 2,
     /// The application sends a FCGI_END_REQUEST record to terminate a request
-    pub const END_REQUEST: u8 = 3;
-
-    /// type component of Header
-    /// # Request
+    EndRequest = 3,
     /// Receive name-value pairs from the Web server to the application
-    pub const PARAMS: u8 = 4;
-
-    /// type component of Header
-    /// # Request
+    Params = 4,
     /// Byte Stream
-    pub const STDIN: u8 = 5;
-
-    /// type component of Header
-    /// # Response
+    StdIn = 5,
     /// Byte Stream
-    pub const STDOUT: u8 = 6;
-
-    /// type component of Header
-    /// # Response
+    StdOut = 6,
     /// Byte Stream
-    pub const STDERR: u8 = 7;
-
-    /// type component of Header
-    /// # Request
+    StdErr = 7,
     /// Byte Stream
-    pub const DATA: u8 = 8;
-
-    /// type component of Header
-    /// # Request
+    Data = 8,
     /// The Web server can query specific variables within the application
     /// The application receives.
-    pub const GET_VALUES: u8 = 9;
-
-    /// type component of Header
-    /// # Response
+    GetValues = 9,
     /// The Web server can query specific variables within the application.
     /// The application responds.
-    pub const GET_VALUES_RESULT: u8 = 10;
-
-    /// type component of Header
-    ///
+    GetValuesResult = 10,
     /// Unrecognized management record
     #[cfg(feature = "web_server")]
-    const UNKNOWN_TYPE: u8 = 11;
+    UnknownType = 11,
+}
+impl TryFrom<u8> for RecordType {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(RecordType::BeginRequest),
+            2 => Ok(RecordType::AbortRequest),
+            3 => Ok(RecordType::EndRequest),
+            4 => Ok(RecordType::Params),
+            5 => Ok(RecordType::StdIn),
+            6 => Ok(RecordType::StdOut),
+            7 => Ok(RecordType::StdErr),
+            8 => Ok(RecordType::Data),
+            9 => Ok(RecordType::GetValues),
+            10 => Ok(RecordType::GetValuesResult),
+            #[cfg(feature = "web_server")]
+            11 => Ok(RecordType::UnknownType),
+            o => Err(o),
+        }
+    }
+}
+impl Display for RecordType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            //RecordType::Other(o) => f.write_fmt(format_args!("Unknown Status: {}", o)),
+            RecordType::BeginRequest => f.write_str("BeginRequest"),
+            RecordType::AbortRequest => f.write_str("AbortRequest"),
+            RecordType::EndRequest => f.write_str("EndRequest"),
+            RecordType::Params => f.write_str("Params"),
+            RecordType::StdIn => f.write_str("StdIn"),
+            RecordType::StdOut => f.write_str("StdOut"),
+            RecordType::StdErr => f.write_str("StdErr"),
+            RecordType::Data => f.write_str("Data"),
+            RecordType::GetValues => f.write_str("GetValues"),
+            RecordType::GetValuesResult => f.write_str("GetValuesResult"),
+            #[cfg(feature = "web_server")]
+            RecordType::UnknownType => f.write_str("UnknownType"),
+        }
+    }
 }
 impl BeginRequestBody {
     /// Mask for flags component of BeginRequestBody
@@ -180,16 +191,16 @@ pub enum ProtoStatus {
     Overloaded = 2,
     /// Web server has specified a role that is unknown to the application
     UnknownRole = 3,
-    Other(u8)
 }
-impl From<u8> for ProtoStatus {
-    fn from(value: u8) -> Self {
+impl TryFrom<u8> for ProtoStatus {
+    type Error = u8;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0 => ProtoStatus::Complete,
-            1 => ProtoStatus::CantMpxCon,
-            2 => ProtoStatus::Overloaded,
-            3 => ProtoStatus::UnknownRole,
-            o => ProtoStatus::Other(o),
+            0 => Ok(ProtoStatus::Complete),
+            1 => Ok(ProtoStatus::CantMpxCon),
+            2 => Ok(ProtoStatus::Overloaded),
+            3 => Ok(ProtoStatus::UnknownRole),
+            o => Err(o),
         }
     }
 }
@@ -200,7 +211,6 @@ impl Display for ProtoStatus {
             ProtoStatus::CantMpxCon => f.write_str("CantMpxCon"),
             ProtoStatus::Overloaded => f.write_str("Overloaded"),
             ProtoStatus::UnknownRole => f.write_str("UnknownRole"),
-            ProtoStatus::Other(o) => f.write_fmt(format_args!("Unknown Status: {}", o)),
         }
     }
 }
@@ -279,19 +289,20 @@ impl NameValuePair {
 impl STDINBody {
     /// create a single STDIN record from Bytes
     /// remaining bytes might be left if the record is full
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(request_id: u16, b: &mut dyn Buf) -> Record {
         let mut rec_data = b.take(Body::MAX_LENGTH);
         let len = rec_data.remaining();
 
         Record {
-            header: Header::new(Record::STDIN, request_id, len as u16),
+            header: Header::new(RecordType::StdIn, request_id, len as u16),
             body: Body::StdIn(rec_data.copy_to_bytes(len)),
         }
     }
 }
 
 impl Header {
-    pub fn new(rtype: u8, request_id: u16, len: u16) -> Header {
+    pub fn new(rtype: RecordType, request_id: u16, len: u16) -> Header {
         let mut pad: u8 = (len % 8) as u8;
         if pad != 0 {
             pad = 8 - pad;
@@ -306,7 +317,7 @@ impl Header {
     }
     pub fn write_into<BM: BufMut>(self, data: &mut BM) {
         data.put_u8(self.version);
-        data.put_u8(self.rtype);
+        data.put_u8(self.rtype as u8);
         data.put_u16(self.request_id);
         data.put_u16(self.content_length);
         data.put_u8(self.padding_length);
@@ -317,7 +328,7 @@ impl Header {
     fn parse(data: &mut Bytes) -> Header {
         let h = Header {
             version: data.get_u8(),
-            rtype: data.get_u8(),
+            rtype: data.get_u8().try_into().expect("not a fcgi type"),
             request_id: data.get_u16(),
             content_length: data.get_u16(),
             padding_length: data.get_u8(),
@@ -334,11 +345,12 @@ impl Header {
 
 impl BeginRequestBody {
     /// create a record of type BeginRequest
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(role: FastCGIRole, flags: u8, request_id: u16) -> Record {
         Record {
             header: Header {
                 version: Header::VERSION_1,
-                rtype: Record::BEGIN_REQUEST,
+                rtype: RecordType::BeginRequest,
                 request_id,
                 content_length: 8,
                 padding_length: 0,
@@ -445,19 +457,19 @@ impl Record {
         Some(Record { header, body })
     }
     #[cfg(feature = "web_server")]
-    fn parse_body(mut payload: Bytes, ptype: u8) -> Body {
+    fn parse_body(mut payload: Bytes, ptype: RecordType) -> Body {
         match ptype {
-            Record::STDOUT => Body::StdOut(payload),
-            Record::STDERR => Body::StdErr(payload),
-            Record::END_REQUEST => Body::EndRequest(EndRequestBody::parse(payload)),
-            Record::UNKNOWN_TYPE => {
+            RecordType::StdOut => Body::StdOut(payload),
+            RecordType::StdErr => Body::StdErr(payload),
+            RecordType::EndRequest => Body::EndRequest(EndRequestBody::parse(payload)),
+            RecordType::UnknownType => {
                 let rtype = payload.get_u8();
                 payload.advance(7);
                 Body::UnknownType(UnknownTypeBody { rtype })
             }
-            Record::GET_VALUES_RESULT => Body::GetValuesResult(NVBody::from_bytes(payload)),
-            Record::GET_VALUES => Body::GetValues(NVBody::from_bytes(payload)),
-            Record::PARAMS => Body::Params(NVBody::from_bytes(payload)),
+            RecordType::GetValuesResult => Body::GetValuesResult(NVBody::from_bytes(payload)),
+            RecordType::GetValues => Body::GetValues(NVBody::from_bytes(payload)),
+            RecordType::Params => Body::Params(NVBody::from_bytes(payload)),
             _ => panic!("not impl"),
         }
     }
@@ -504,7 +516,7 @@ impl NVBody {
             len: 0,
         }
     }
-    pub fn to_record(self, rtype: u8, request_id: u16) -> Record {
+    pub fn to_record(self, rtype: RecordType, request_id: u16) -> Record {
         let mut pad: u8 = (self.len % 8) as u8;
         if pad != 0 {
             pad = 8 - pad;
@@ -518,9 +530,9 @@ impl NVBody {
                 padding_length: pad,
             },
             body: match rtype {
-                Record::PARAMS => Body::Params(self),
-                Record::GET_VALUES => Body::GetValues(self),
-                Record::GET_VALUES_RESULT => Body::GetValuesResult(self),
+                RecordType::Params => Body::Params(self),
+                RecordType::GetValues => Body::GetValues(self),
+                RecordType::GetValuesResult => Body::GetValuesResult(self),
                 _ => panic!("No valid type"),
             },
         }
@@ -655,7 +667,7 @@ impl EndRequestBody {
     fn parse(mut data: Bytes) -> EndRequestBody {
         let b = EndRequestBody {
             app_status: data.get_u32(),
-            protocol_status: data.get_u8().into(),
+            protocol_status: data.get_u8().try_into().expect("not a fcgi status"),
         };
         data.advance(3); // reserved
         b
@@ -678,8 +690,8 @@ fn encode_simple_get() {
         Bytes::from(&b"/home/daniel/Public/test.php"[..]),
     ))
     .expect("record full");
-    nv.to_record(Record::PARAMS, 1).append(&mut b);
-    NVBody::new().to_record(Record::PARAMS, 1).append(&mut b);
+    nv.to_record(RecordType::Params, 1).append(&mut b);
+    NVBody::new().to_record(RecordType::Params, 1).append(&mut b);
 
     let mut dst = [0; 80];
     b.copy_to_slice(&mut dst);
@@ -700,8 +712,8 @@ fn encode_post() {
         Bytes::from(&b"/home/daniel/Public/test.php"[..]),
     ))
     .expect("record full");
-    nv.to_record(Record::PARAMS, 1).append(&mut b);
-    NVBody::new().to_record(Record::PARAMS, 1).append(&mut b);
+    nv.to_record(RecordType::Params, 1).append(&mut b);
+    NVBody::new().to_record(RecordType::Params, 1).append(&mut b);
     STDINBody::new(1, &mut Bytes::from(&b"a=b"[..])).append(&mut b);
     STDINBody::new(1, &mut Bytes::new()).append(&mut b);
 

@@ -279,7 +279,7 @@ impl Connection {
         };
         mut_inner.io.encode(br).await?;
         //Prepare the CGI headers
-        let mut kvw = mut_inner.io.kv_stream(rid, fastcgi::Record::PARAMS);
+        let mut kvw = mut_inner.io.kv_stream(rid, fastcgi::RecordType::Params);
 
         kvw.extend(dyn_headers).await?;
 
@@ -399,7 +399,7 @@ impl Connection {
             //send end of STDIN
             mut_inner
                 .io
-                .flush_data_chunk(Self::NULL, rid, fastcgi::Record::STDIN)
+                .flush_data_chunk(Self::NULL, rid, fastcgi::RecordType::StdIn)
                 .await?;
             drop(mut_inner); // close mutex before create_response
             self.create_response(rid).await
@@ -428,7 +428,7 @@ impl Connection {
                     .lock()
                     .await
                     .io
-                    .flush_data_chunk(data, request_id, fastcgi::Record::STDIN)
+                    .flush_data_chunk(data, request_id, fastcgi::RecordType::StdIn)
                     .await?;
             }
         }
@@ -445,7 +445,7 @@ impl Connection {
             .lock()
             .await
             .io
-            .flush_data_chunk(Self::NULL, request_id, fastcgi::Record::STDIN)
+            .flush_data_chunk(Self::NULL, request_id, fastcgi::RecordType::StdIn)
             .await?;
 
         debug!("sent req body");

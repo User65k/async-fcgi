@@ -13,7 +13,7 @@
 
 use crate::client::connection::{Connection, MultiHeaderStrategy, HeaderMultilineStrategy};
 use crate::codec::FCGIWriter;
-use crate::fastcgi::{Body, Record, MAX_CONNS, MAX_REQS, MPXS_CONNS};
+use crate::fastcgi::{Body, Record, MAX_CONNS, MAX_REQS, MPXS_CONNS, RecordType};
 use crate::stream::{FCGIAddr, Stream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Request, Response};
@@ -72,7 +72,7 @@ impl ConPool {
         // query VALUES from connection
         let stream = Stream::connect(sock_addr).await?;
         let mut stream = FCGIWriter::new(stream);
-        let mut kvw = stream.kv_stream(Record::MGMT_REQUEST_ID, Record::GET_VALUES);
+        let mut kvw = stream.kv_stream(Record::MGMT_REQUEST_ID, RecordType::GetValues);
         kvw.add_kv(MAX_CONNS, Bytes::new()).await?;
         kvw.add_kv(MAX_REQS, Bytes::new()).await?;
         kvw.add_kv(MPXS_CONNS, Bytes::new()).await?;
