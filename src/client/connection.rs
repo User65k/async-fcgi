@@ -795,7 +795,7 @@ impl InnerConnection {
                     }
                     fastcgi::Body::EndRequest(status) => {
                         match status.protocol_status {
-                            fastcgi::EndRequestBody::REQUEST_COMPLETE => {
+                            fastcgi::ProtoStatus::Complete => {
                                 info!("Req #{} ended with {}", req_no + 1, status.app_status)
                             }
                             //CANT_MPX_CONN => ,

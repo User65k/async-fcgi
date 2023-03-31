@@ -33,7 +33,7 @@ pub struct BeginRequestBody {
 }
 pub struct EndRequestBody {
     pub app_status: u32,
-    pub protocol_status: u8,
+    pub protocol_status: ProtoStatus,
     //    pub reserved: [u8; 3],
 }
 pub struct UnknownTypeBody {
@@ -169,26 +169,40 @@ pub enum FastCGIRole {
     Authorizer = 2,    
     Filter = 3
 }
-impl EndRequestBody {
-    /// protocol_status component of EndRequestBody
-    ///
+/// protocol_status component of EndRequestBody
+#[repr(u8)]
+pub enum ProtoStatus {
     /// Normal end of request
-    pub const REQUEST_COMPLETE: u8 = 0;
-
-    /// protocol_status component of EndRequestBody
-    ///
+    Complete = 0,
     /// Application is designed to process one request at a time per connection
-    pub const CANT_MPX_CONN: u8 = 1;
-
-    /// protocol_status component of EndRequestBody
-    ///
+    CantMpxCon = 1,
     /// The application runs out of some resource, e.g. database connections
-    pub const OVERLOADED: u8 = 2;
-
-    /// protocol_status component of EndRequestBody
-    ///
+    Overloaded = 2,
     /// Web server has specified a role that is unknown to the application
-    pub const UNKNOWN_ROLE: u8 = 3;
+    UnknownRole = 3,
+    Other(u8)
+}
+impl From<u8> for ProtoStatus {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => ProtoStatus::Complete,
+            1 => ProtoStatus::CantMpxCon,
+            2 => ProtoStatus::Overloaded,
+            3 => ProtoStatus::UnknownRole,
+            o => ProtoStatus::Other(o),
+        }
+    }
+}
+impl Display for ProtoStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ProtoStatus::Complete => f.write_str("Complete"),
+            ProtoStatus::CantMpxCon => f.write_str("CantMpxCon"),
+            ProtoStatus::Overloaded => f.write_str("Overloaded"),
+            ProtoStatus::UnknownRole => f.write_str("UnknownRole"),
+            ProtoStatus::Other(o) => f.write_fmt(format_args!("Unknown Status: {}", o)),
+        }
+    }
 }
 /// The maximum number of concurrent transport connections this application will accept
 /// 
