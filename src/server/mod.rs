@@ -1,5 +1,5 @@
 /*! Fast CGI server/application side
- * 
+ *
 */
 
 /*
@@ -15,16 +15,13 @@ use bytes::BytesMut;
 /// FCGI client such as a frontend web server. The Encoder passes through the raw response to be sent
 /// back to the FCGI client.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct FCGICodec {
-}
-
+pub struct FCGICodec {}
 
 impl FCGICodec {
     /// Returns a client `FCGICodec` for accepting and parsing FCGI-format requests by FCGI servers
     /// like backend services.
     pub fn new() -> FCGICodec {
-        FCGICodec {
-        }
+        FCGICodec {}
     }
 }
 /*

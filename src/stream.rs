@@ -1,31 +1,31 @@
 /*! FCGI Server/Clients usually support TCP as well as Unixsockets
- * 
- * 
+ *
+ *
  */
 
-use tokio::io::{AsyncRead, AsyncWrite, Error, ReadBuf};
-use tokio::net::{TcpStream,TcpListener};
-#[cfg(unix)]
-use tokio::net::{UnixStream,UnixListener};
 use std::pin::Pin;
 use std::task::{Context, Poll};
-
-use std::net;
-use std::fmt;
-use std::str::FromStr;
-use std::io;
+use tokio::io::{AsyncRead, AsyncWrite, Error, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
 #[cfg(unix)]
-use std::path::{Path,PathBuf};
+use tokio::net::{UnixListener, UnixStream};
+
+use std::fmt;
+use std::io;
+use std::net;
+#[cfg(unix)]
+use std::os::unix::io::{AsRawFd, RawFd};
 #[cfg(unix)]
 use std::os::unix::net as unix;
 #[cfg(unix)]
-use std::os::unix::io::{RawFd,AsRawFd};
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
-#[derive(Debug,Clone,PartialEq,Eq,Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FCGIAddr {
     Inet(net::SocketAddr),
     #[cfg(unix)]
-    Unix(PathBuf)
+    Unix(PathBuf),
 }
 
 impl From<net::SocketAddr> for FCGIAddr {
@@ -51,7 +51,7 @@ impl From<unix::SocketAddr> for FCGIAddr {
     fn from(s: unix::SocketAddr) -> FCGIAddr {
         FCGIAddr::Unix(match s.as_pathname() {
             None => Path::new("unnamed").to_path_buf(),
-            Some(p) => p.to_path_buf()
+            Some(p) => p.to_path_buf(),
         })
     }
 }
@@ -60,18 +60,17 @@ impl From<tokio::net::unix::SocketAddr> for FCGIAddr {
     fn from(s: tokio::net::unix::SocketAddr) -> FCGIAddr {
         FCGIAddr::Unix(match s.as_pathname() {
             None => Path::new("unnamed").to_path_buf(),
-            Some(p) => p.to_path_buf()
+            Some(p) => p.to_path_buf(),
         })
     }
 }
-
 
 impl fmt::Display for FCGIAddr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             FCGIAddr::Inet(n) => write!(f, "{}", n),
             #[cfg(unix)]
-            FCGIAddr::Unix(n) => write!(f, "{}", n.to_string_lossy())
+            FCGIAddr::Unix(n) => write!(f, "{}", n.to_string_lossy()),
         }
     }
 }
@@ -97,7 +96,7 @@ impl FromStr for FCGIAddr {
 pub enum Stream {
     Inet(TcpStream),
     #[cfg(unix)]
-    Unix(UnixStream)
+    Unix(UnixStream),
 }
 
 impl From<TcpStream> for Stream {
@@ -118,7 +117,7 @@ impl Stream {
         match s {
             FCGIAddr::Inet(s) => TcpStream::connect(s).await.map(Stream::Inet),
             #[cfg(unix)]
-            FCGIAddr::Unix(s) => UnixStream::connect(s).await.map(Stream::Unix)
+            FCGIAddr::Unix(s) => UnixStream::connect(s).await.map(Stream::Unix),
         }
     }
 
@@ -126,7 +125,7 @@ impl Stream {
         match self {
             Stream::Inet(s) => s.local_addr().map(FCGIAddr::Inet),
             #[cfg(unix)]
-            Stream::Unix(s) => s.local_addr().map(|e| e.into())
+            Stream::Unix(s) => s.local_addr().map(|e| e.into()),
         }
     }
 
@@ -134,35 +133,33 @@ impl Stream {
         match self {
             Stream::Inet(s) => s.peer_addr().map(FCGIAddr::Inet),
             #[cfg(unix)]
-            Stream::Unix(s) => s.peer_addr().map(|e| e.into())
+            Stream::Unix(s) => s.peer_addr().map(|e| e.into()),
         }
     }
-
 }
 impl AsyncRead for Stream {
     fn poll_read(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
-        buf: &mut ReadBuf<'_>
+        buf: &mut ReadBuf<'_>,
     ) -> Poll<Result<(), Error>> {
         match &mut *self {
             Stream::Inet(s) => Pin::new(s).as_mut().poll_read(cx, buf),
             #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).as_mut().poll_read(cx, buf)
+            Stream::Unix(s) => Pin::new(s).as_mut().poll_read(cx, buf),
         }
     }
-
 }
 impl AsyncWrite for Stream {
     fn poll_write(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
-        buf: &[u8]
+        buf: &[u8],
     ) -> Poll<Result<usize, Error>> {
         match &mut *self {
             Stream::Inet(s) => Pin::new(s).as_mut().poll_write(cx, buf),
             #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).as_mut().poll_write(cx, buf)
+            Stream::Unix(s) => Pin::new(s).as_mut().poll_write(cx, buf),
         }
     }
 
@@ -170,39 +167,42 @@ impl AsyncWrite for Stream {
         match &mut *self {
             Stream::Inet(s) => Pin::new(s).as_mut().poll_flush(cx),
             #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).as_mut().poll_flush(cx)
+            Stream::Unix(s) => Pin::new(s).as_mut().poll_flush(cx),
         }
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context
-    ) -> Poll<Result<(), Error>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Result<(), Error>> {
         match &mut *self {
             Stream::Inet(s) => Pin::new(s).as_mut().poll_shutdown(cx),
             #[cfg(unix)]
-            Stream::Unix(s) => Pin::new(s).as_mut().poll_shutdown(cx)
+            Stream::Unix(s) => Pin::new(s).as_mut().poll_shutdown(cx),
         }
     }
 }
 pub enum Listener {
     Inet(TcpListener),
     #[cfg(unix)]
-    Unix(UnixListener)
+    Unix(UnixListener),
 }
 impl Listener {
     pub async fn bind(s: &FCGIAddr) -> io::Result<Listener> {
         match s {
             FCGIAddr::Inet(s) => TcpListener::bind(s).await.map(Listener::Inet),
             #[cfg(unix)]
-            FCGIAddr::Unix(s) => UnixListener::bind(s).map(Listener::Unix)
+            FCGIAddr::Unix(s) => UnixListener::bind(s).map(Listener::Unix),
         }
     }
     pub async fn accept(&mut self) -> io::Result<(Stream, FCGIAddr)> {
         match &mut *self {
-            Listener::Inet(s) => s.accept().await.map(|(s,a)|(Stream::Inet(s),FCGIAddr::Inet(a))),
+            Listener::Inet(s) => s
+                .accept()
+                .await
+                .map(|(s, a)| (Stream::Inet(s), FCGIAddr::Inet(a))),
             #[cfg(unix)]
-            Listener::Unix(s) => s.accept().await.map(|(s,a)|(Stream::Unix(s),FCGIAddr::from(a)))
+            Listener::Unix(s) => s
+                .accept()
+                .await
+                .map(|(s, a)| (Stream::Unix(s), FCGIAddr::from(a))),
         }
     }
 }
@@ -212,7 +212,7 @@ impl AsRawFd for Listener {
         match self {
             Listener::Inet(s) => s.as_raw_fd(),
             #[cfg(unix)]
-            Listener::Unix(s) => s.as_raw_fd()
+            Listener::Unix(s) => s.as_raw_fd(),
         }
     }
 }
@@ -232,15 +232,15 @@ impl Drop for Listener {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use tokio::runtime::Builder;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use bytes::{Bytes, BytesMut};
     use std::net::SocketAddr;
-    use bytes::{BytesMut, Bytes};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     #[cfg(unix)]
     use tokio::net::UnixListener;
+    use tokio::runtime::Builder;
 
-    pub(crate) async fn local_socket_pair() -> Result<(TcpListener, FCGIAddr),std::io::Error> {
+    pub(crate) async fn local_socket_pair() -> Result<(TcpListener, FCGIAddr), std::io::Error> {
         let a: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let app_listener = TcpListener::bind(a).await?;
         let a: FCGIAddr = app_listener.local_addr()?.into();
@@ -264,7 +264,9 @@ pub(crate) mod tests {
             let mut s = Stream::connect(&a).await.expect("tcp connect failed");
 
             let data = b"1234";
-            s.write_buf(&mut Bytes::from(&data[..])).await.expect("tcp write failed");
+            s.write_buf(&mut Bytes::from(&data[..]))
+                .await
+                .expect("tcp write failed");
 
             let mut buf = BytesMut::with_capacity(4096);
             s.read_buf(&mut buf).await.expect("tcp read failed");
@@ -293,7 +295,9 @@ pub(crate) mod tests {
             let mut s = Stream::connect(&a).await.expect("unix connect failed");
 
             let data = b"1234";
-            s.write_buf(&mut Bytes::from(&data[..])).await.expect("unix write failed");
+            s.write_buf(&mut Bytes::from(&data[..]))
+                .await
+                .expect("unix write failed");
 
             let mut buf = BytesMut::with_capacity(4096);
             s.read_buf(&mut buf).await.expect("unix read failed");

@@ -1,5 +1,5 @@
-use std::collections::VecDeque;
 use bytes::Buf;
+use std::collections::VecDeque;
 
 pub(crate) struct BufList<T> {
     bufs: VecDeque<T>,
@@ -47,12 +47,11 @@ impl<T: Buf> Buf for BufList<T> {
                     front.advance(rem);
                     cnt -= rem;
                 }
-            }else{
+            } else {
                 //no data -> panic?
                 return;
             }
             self.bufs.pop_front();
         }
     }
-
 }
