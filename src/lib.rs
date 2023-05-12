@@ -17,6 +17,7 @@ with focus on
 [`Connection`]: ./client/connection/index.html
 [`FCGICodec`]: ./server/struct.FCGICodec.html
 */
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 mod bufvec;
 pub mod fastcgi;
