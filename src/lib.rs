@@ -22,9 +22,11 @@ mod bufvec;
 pub mod fastcgi;
 
 #[cfg(feature = "web_server")]
+#[cfg_attr(docsrs, doc(cfg(feature = "web_server")))]
 pub mod stream;
 #[cfg(feature = "web_server")]
-pub use stream::FCGIAddr;
+#[cfg_attr(docsrs, doc(cfg(feature = "web_server")))]
+pub use async_stream_connection::Addr as FCGIAddr;
 
 #[cfg(feature = "web_server")]
 pub mod client;

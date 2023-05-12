@@ -14,7 +14,7 @@
 use crate::client::connection::{Connection, MultiHeaderStrategy, HeaderMultilineStrategy};
 use crate::codec::FCGIWriter;
 use crate::fastcgi::{Body, Record, MAX_CONNS, MAX_REQS, MPXS_CONNS, RecordType};
-use crate::stream::{FCGIAddr, Stream};
+use async_stream_connection::{Addr, Stream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Request, Response};
 use http_body::Body as HttpBody;
@@ -26,7 +26,7 @@ use std::iter::IntoIterator;
 use tokio::io::AsyncReadExt;
 
 #[cfg(all(unix, feature = "app_start"))]
-use crate::stream::Listener;
+use async_stream_connection::Listener;
 #[cfg(feature = "app_start")]
 use std::ffi::OsStr;
 #[cfg(all(unix, feature = "app_start"))]
@@ -50,7 +50,7 @@ impl ConPool {
     /// Connect to a FCGI server / application with [`MultiHeaderStrategy::OnlyFirst`] & [`HeaderMultilineStrategy::Ignore`].
     /// See [`ConPool::new_with_strategy`]
     #[inline]
-    pub async fn new(sock_addr: &FCGIAddr) -> Result<ConPool, Box<dyn Error>> {
+    pub async fn new(sock_addr: &Addr) -> Result<ConPool, Box<dyn Error>> {
         Self::new_with_strategy(
             sock_addr,
             MultiHeaderStrategy::OnlyFirst,
@@ -65,7 +65,7 @@ impl ConPool {
     /// and [`MPXS_CONNS`] from the server
     /// and uses the values to create a [`Connection`].
     pub async fn new_with_strategy(
-        sock_addr: &FCGIAddr,
+        sock_addr: &Addr,
         header_mul: MultiHeaderStrategy,
         header_nl: HeaderMultilineStrategy,
     ) -> Result<ConPool, Box<dyn Error>> {
@@ -201,7 +201,7 @@ impl ConPool {
     /// # Ok(())
     /// # }
     /// ```
-    pub async fn prep_server<S>(program: S, sock_addr: &FCGIAddr) -> Result<Command, IoError>
+    pub async fn prep_server<S>(program: S, sock_addr: &Addr) -> Result<Command, IoError>
     where
         S: AsRef<OsStr>,
     {
@@ -229,7 +229,7 @@ impl ConPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::tests::local_socket_pair;
+    use crate::client::tests::local_socket_pair;
     use std::collections::HashMap;
     use std::iter::FromIterator;
     use std::process::ExitStatus;
@@ -243,7 +243,7 @@ mod tests {
         async fn spawn() {
             let mut env = HashMap::new();
             env.insert("PATH", "/usr/bin");
-            let a: FCGIAddr = "/tmp/jo".parse().unwrap();
+            let a: Addr = "/tmp/jo".parse().unwrap();
             let s: ExitStatus = ConPool::prep_server("ls", &a)
                 .await
                 .expect("prep_server error")

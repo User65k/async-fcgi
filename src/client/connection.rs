@@ -68,7 +68,7 @@ use crate::bufvec::BufList;
 use crate::codec::{FCGIType, FCGIWriter};
 use crate::fastcgi;
 use crate::httpparse::{parse, ParseResult};
-use crate::stream::{FCGIAddr, Stream};
+use async_stream_connection::{Addr, Stream};
 use tokio::io::{AsyncBufRead, BufReader};
 
 /// [http_body](https://docs.rs/http-body/0.3.1/http_body/trait.Body.html) type for FCGI.
@@ -106,7 +106,7 @@ struct InnerConnection {
 pub struct Connection {
     inner: Arc<Mutex<InnerConnection>>,
     sem: Arc<Semaphore>,
-    addr: FCGIAddr,
+    addr: Addr,
     header_mul: MultiHeaderStrategy,
     header_nl: HeaderMultilineStrategy,
 }
@@ -132,7 +132,7 @@ impl Connection {
     /// Connect to a peer with [`MultiHeaderStrategy::OnlyFirst`] & [`HeaderMultilineStrategy::Ignore`].
     #[inline]
     pub async fn connect(
-        addr: &FCGIAddr,
+        addr: &Addr,
         max_req_per_con: u16,
     ) -> Result<Connection, Box<dyn Error>> {
         Self::connect_with_strategy(
@@ -145,7 +145,7 @@ impl Connection {
     }
     /// Connect to a peer
     pub async fn connect_with_strategy(
-        addr: &FCGIAddr,
+        addr: &Addr,
         max_req_per_con: u16,
         header_mul: MultiHeaderStrategy,
         header_nl: HeaderMultilineStrategy,
@@ -826,7 +826,7 @@ impl InnerConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::tests::local_socket_pair;
+    use crate::client::tests::local_socket_pair;
     use http_body::SizeHint;
     use std::collections::{HashMap, VecDeque};
     use tokio::{
