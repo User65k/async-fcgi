@@ -49,3 +49,8 @@ required-features = ["con_pool","tokio/rt"]
 name = "start_fcgi_server_from_client"
 path = "examples/start_fcgi_server_from_client.rs"
 required-features = ["app_start","tokio/rt"]
+
+[package.metadata.docs.rs]
+all-features = true
+# enable unstable features in the documentation
+rustdoc-args = ["--cfg", "docsrs"]
