@@ -30,13 +30,17 @@ pub mod stream;
 pub use async_stream_connection::Addr as FCGIAddr;
 
 #[cfg(feature = "web_server")]
+#[cfg_attr(docsrs, doc(cfg(feature = "web_server")))]
 pub mod client;
 
 #[cfg(feature = "web_server")]
+#[cfg_attr(docsrs, doc(cfg(feature = "web_server")))]
 mod httpparse;
 
 #[cfg(feature = "application")]
+#[cfg_attr(docsrs, doc(cfg(feature = "application")))]
 pub mod server;
 
 #[cfg(feature = "codec")]
+#[cfg_attr(docsrs, doc(cfg(feature = "codec")))]
 pub mod codec;
