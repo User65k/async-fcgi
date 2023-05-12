@@ -1,6 +1,6 @@
 [package]
 name = "async-fcgi"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["User65k <15049544+User65k@users.noreply.github.com>"]
 edition = "2021"
 license = "AGPL-3.0"
@@ -23,7 +23,7 @@ tokio = { version = "1", optional = true }
 tokio-util = { version ="0.7", optional = true }
 http-body = { version = "0.4", optional = true }
 slab = { version = "0.4", optional = true }
-async-stream-connection = {version="1.0"}
+async-stream-connection = {version="1.0", optional = true}
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt","macros"] }
@@ -34,7 +34,7 @@ hyper = {version = "0.14", features = ["http1", "server", "stream", "runtime"]} 
 # only FCGI types by default
 default = []
 
-web_server = ["slab","http-body","httparse","tokio/net","tokio/io-util","tokio/sync", "codec","tokio/macros"]
+web_server = ["slab","http-body","httparse","tokio/net","tokio/io-util","tokio/sync", "codec","tokio/macros", "async-stream-connection"]
 con_pool = ["web_server"]
 app_start = ["con_pool", "tokio/process"]
 #application = ["httparse","tokio/net"]
