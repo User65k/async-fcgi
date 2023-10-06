@@ -1090,4 +1090,44 @@ mod tests {
         }
         rt.block_on(con());
     }
+    #[test]
+    fn long_header() {
+        init_log();
+        // Create the runtime
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\xb8\0\0\x0c\0QUERY_STRING\x0e\x03REQUEST_METHODGET\x0b\x80\0\0\x87HTTP_ACCEPTtext/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
+            assert_eq!(buf, Bytes::from(&to_php[..]));
+            trace!("app answers on get");
+            let from_php = b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
+            app_socket
+                .write_buf(&mut Bytes::from(&from_php[..]))
+                .await
+                .unwrap();
+        }
+
+        async fn con() {
+            let (app_listener, a) = local_socket_pair().await.unwrap();
+            let m = tokio::spawn(mock_app(app_listener));
+
+            let fcgi_con = Connection::connect(&a, 1).await.unwrap();
+            trace!("new connection obj");
+            let b = TestBod { l: VecDeque::new() };
+            let req = Request::get("/")
+                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+                .body(b)
+                .unwrap();
+            trace!("new req obj");
+            let mut params: HashMap<Bytes, Bytes> = HashMap::new();
+            let mut res = fcgi_con.forward(req, params).await.expect("forward failed");
+            trace!("got res obj");
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+            m.await.unwrap();
+        }
+        rt.block_on(con());
+    }
 }

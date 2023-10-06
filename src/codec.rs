@@ -415,7 +415,7 @@ impl<R: AsyncWrite + Unpin> NameValuePairWriter<'_, R> {
             if ln > 0x7fffffff {
                 panic!();
             }
-            ln |= 0x8000;
+            ln |= 0x80000000;
             blen.put_u32(ln as u32);
         } else {
             blen.put_u8(ln as u8);
@@ -424,7 +424,7 @@ impl<R: AsyncWrite + Unpin> NameValuePairWriter<'_, R> {
             if lv > 0x7fffffff {
                 panic!();
             }
-            lv |= 0x8000;
+            lv |= 0x80000000;
             blen.put_u32(lv as u32);
         } else {
             blen.put_u8(lv as u8);
