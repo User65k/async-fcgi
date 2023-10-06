@@ -559,14 +559,14 @@ impl NVBody {
                 return Err(());
             }
             lf += 3;
-            ln |= 0x8000;
+            ln |= 0x80000000;
         }
         if lv > 0x7f {
             if lv > 0x7fffffff {
                 return Err(());
             }
             lf += 3;
-            lv |= 0x8000;
+            lv |= 0x80000000;
         }
         let mut data: BytesMut = BytesMut::with_capacity(lf);
         if ln > 0x7f {
@@ -704,7 +704,7 @@ fn encode_simple_get() {
 }
 #[test]
 fn encode_post() {
-    let mut b = BytesMut::with_capacity(80);
+    let mut b = BytesMut::with_capacity(104);
     BeginRequestBody::new(FastCGIRole::Responder, 0, 1).append(&mut b);
     let mut nv = NVBody::new();
     nv.add(NameValuePair::new(
@@ -731,4 +731,28 @@ fn encode_post() {
     let expected = b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0-\x03\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\xff\xff\xff\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\x03\x05\0a=b\xff\xff\xff\xff\xff\x01\x05\0\x01\0\0\0\0";
 
     assert_eq!(dst, &expected[..]);
+}
+
+#[test]
+fn encode_long_param() {
+    let mut b = BytesMut::with_capacity(190);
+    BeginRequestBody::new(FastCGIRole::Responder, 0, 1).append(&mut b);
+    let mut nv = NVBody::new();
+    nv.add(NameValuePair::new(
+        Bytes::from(&b"HTTP_ACCEPT"[..]),
+        Bytes::from(&b"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7"[..]),
+    ))
+    .expect("record full");
+    nv.to_record(RecordType::Params, 1).append(&mut b);
+    NVBody::new().to_record(RecordType::Params, 1).append(&mut b);
+
+    let mut dst = [0; 184];
+    b.copy_to_slice(&mut dst);
+
+    //padding is uninit
+    dst[175]=1;
+
+    let expected = b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0\x97\x01\0\x0b\x80\0\0\x87HTTP_ACCEPTtext/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\x01\x01\x04\0\x01\0\0\0\0";
+
+    assert_eq!(dst, expected[..]);
 }
