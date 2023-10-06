@@ -10,9 +10,6 @@ repository = "https://github.com/User65k/async-fcgi"
 readme = "README.md"
 keywords = ["fastcgi", "fcgi", "protocol", "cgi", "tokio"]
 
-[package.metadata.docs.rs]
-all-features = true
-
 [dependencies]
 bytes = "1"
 http = "0.2"
@@ -49,3 +46,8 @@ required-features = ["con_pool","tokio/rt"]
 name = "start_fcgi_server_from_client"
 path = "examples/start_fcgi_server_from_client.rs"
 required-features = ["app_start","tokio/rt"]
+
+[package.metadata.docs.rs]
+all-features = true
+# enable unstable features in the documentation
+rustdoc-args = ["--cfg", "docsrs"]

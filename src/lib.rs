@@ -8,14 +8,10 @@ with focus on
 
  The default is only to provide the FastCGI Record parsing.
  Use these features to get
- - `con_pool`: [`ConPool`] to manage a set of Connections
- - `web_server`: [`Connection`] to easily resolv HTTPRequests to HTTPResponses
- - `application`: [`FCGICodec`] a tokio codec for FastCGI Servers / Applications
- - `app_start`: [`ConPool`] gains prep_server methode to start an FCGI Application
+ - `con_pool`: [`client::con_pool::ConPool`] to manage a set of Connections
+ - `web_server`: [`client::connection::Connection`] to easily resolv HTTPRequests to HTTPResponses
+ - `app_start`: [`client::con_pool::ConPool`] gains prep_server methode to start an FCGI Application
 
-[`ConPool`]: ./client/con_pool/struct.ConPool.html
-[`Connection`]: ./client/connection/index.html
-[`FCGICodec`]: ./server/struct.FCGICodec.html
 */
 #![cfg_attr(docsrs, feature(doc_cfg))]
 

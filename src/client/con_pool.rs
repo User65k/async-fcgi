@@ -181,6 +181,7 @@ async fn send_and_receive(stream: &mut FCGIWriter<Stream>) -> Result<Vec<Record>
 }
 
 #[cfg(feature = "app_start")]
+#[cfg_attr(docsrs, doc(cfg(feature = "app_start")))]
 impl ConPool {
     /// Setup a [`Command`] to spin up a FCGI server / application
     /// and make it listen on `sock_addr`.
