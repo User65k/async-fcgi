@@ -89,7 +89,10 @@ struct FCGIBody {
 struct FCGIRequest {
     buf: BufList<Bytes>,           //stdout read by some task
     waker: Option<Waker>,          //wake me if needed
+    /// the FCGI server is done with this request
     ended: bool,                   //fin reading
+    /// was aborted (by dropping the FCGIBody)
+    aborted: bool,
     _permit: OwnedSemaphorePermit, //block a multiplex slot
 }
 /// Shared object to read from a `Connection`
@@ -250,6 +253,7 @@ impl Connection {
             buf: BufList::new(),
             waker: None,
             ended: false,
+            aborted: false,
             _permit,
         };
 
@@ -373,8 +377,7 @@ impl Connection {
             if let HeaderMultilineStrategy::ReturnError = self.header_nl {
                 if value.as_ref().contains(&b'\n') {
                     drop(kvw); //stop mid stream
-                    drop(mut_inner); //free mutex
-                    self.abort(rid).await?; //abort request
+                    mut_inner.abort_req(rid).await?; //abort request
                     return Err(IoError::new(
                         ErrorKind::InvalidData,
                         "multiline headers are not allowed",
@@ -434,7 +437,10 @@ impl Connection {
         }
         //CGI1.1 4.2 -> at least content-length data
         if len > 0 {
-            self.abort(request_id).await?;
+            self.inner
+                .lock()
+                .await
+                .abort_req(request_id).await?;
             return Err(std::io::Error::new(
                 std::io::ErrorKind::ConnectionAborted,
                 "body too short",
@@ -450,10 +456,6 @@ impl Connection {
 
         debug!("sent req body");
         Ok(())
-    }
-    async fn abort(&self, request_id: u16) -> Result<(), IoError> {
-        let a = FCGIType::AbortRequest { request_id };
-        self.inner.lock().await.io.encode(a).await
     }
     /// Poll the STDOUT response of the FCGI Server
     /// Parse the Headers and return a body that streams the rest
@@ -564,6 +566,9 @@ impl InnerConnection {
     fn check_alive(&mut self) -> CheckAlive {
         CheckAlive(self)
     }
+    async fn abort_req(&mut self, request_id: u16) -> Result<(), IoError> {
+        self.io.encode(FCGIType::AbortRequest { request_id }).await
+    }
     /// drive this connection
     /// Read, parse and distribute data from the socket.
     /// return None if the connection was closed
@@ -634,8 +639,10 @@ impl Drop for FCGIBody {
         match self.con.try_lock() {
             Ok(mut mut_inner) => {
                 let rid = self.rid as usize;
-                if mut_inner.running_requests.contains(rid) {
-                    mut_inner.running_requests.remove(rid);
+                if let Some(req) = mut_inner.running_requests.get_mut(rid) {
+                    req.aborted = true;
+                    req.waker = None;
+                    //TODO drop the data already
                 }
             }
             Err(e) => error!("{}", e),
@@ -742,10 +749,14 @@ impl Body for FCGIBody {
 }
 
 impl InnerConnection {
+    /// Something happened. We are done with everything
     fn notify_everyone(&mut self) {
         for (rid, mpxs) in self.running_requests.iter_mut() {
             if let Some(waker) = mpxs.waker.take() {
                 waker.wake()
+            }
+            if mpxs.aborted {
+                continue;
             }
             if !mpxs.ended {
                 error!("body #{} not done", rid + 1);
@@ -757,7 +768,7 @@ impl InnerConnection {
         data: &mut Bytes,
         running_requests: &mut Slab<FCGIRequest>,
         fcgi_parser: &mut fastcgi::RecordReader,
-    ) -> Option<Bytes> {
+    ) {
         //trace!("parse {:?}", &data);
         while let Some(r) = fcgi_parser.read(data) {
             let (req_no, ovr) = r.get_request_id().overflowing_sub(1);
@@ -769,7 +780,33 @@ impl InnerConnection {
             debug!("record for #{}", req_no + 1);
             if let Some(mpxs) = running_requests.get_mut(req_no as usize) {
                 match r.body {
-                    fastcgi::Body::StdOut(s) => {
+                    fastcgi::Body::EndRequest(status) => {
+                        match status.protocol_status {
+                            fastcgi::ProtoStatus::Complete => {
+                                info!("Req #{} ended with {}", req_no + 1, status.app_status)
+                            }
+                            //CANT_MPX_CONN => ,
+                            //TODO handle OVERLOADED
+                            _ => error!(
+                                "Req #{} ended with fcgi error {}",
+                                req_no + 1,
+                                status.protocol_status
+                            ),
+                        };
+                        mpxs.ended = true;
+                        if let Some(waker) = mpxs.waker.take() {
+                            waker.wake()
+                        }
+                        if mpxs.aborted {
+                            // fcgi server is also done with it
+                            running_requests.remove(req_no as usize);
+                        }
+                    }
+                    _ if mpxs.aborted => {
+                        //TODO send abort
+                        continue;
+                    }
+                    fastcgi::Body::StdOut(s) => {                        
                         if log_enabled!(Trace) {
                             let print = if s.len() > 50 {
                                 format!(
@@ -793,33 +830,15 @@ impl InnerConnection {
                     fastcgi::Body::StdErr(s) => {
                         error!("FCGI #{} Err: {:?}", req_no + 1, s);
                     }
-                    fastcgi::Body::EndRequest(status) => {
-                        match status.protocol_status {
-                            fastcgi::ProtoStatus::Complete => {
-                                info!("Req #{} ended with {}", req_no + 1, status.app_status)
-                            }
-                            //CANT_MPX_CONN => ,
-                            //TODO handle OVERLOADED
-                            _ => error!(
-                                "Req #{} ended with fcgi error {}",
-                                req_no + 1,
-                                status.protocol_status
-                            ),
-                        };
-                        mpxs.ended = true;
-                        if let Some(waker) = mpxs.waker.take() {
-                            waker.wake()
-                        }
-                    }
                     _ => {
                         warn!("type?");
                     }
                 }
             } else {
-                debug!("not a pending red ID");
+                debug!("not a pending req ID");
+                //TODO send abort
             }
         }
-        None
     }
 }
 
