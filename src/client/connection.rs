@@ -797,6 +797,10 @@ impl InnerConnection {
                         if let Some(waker) = mpxs.waker.take() {
                             waker.wake()
                         }
+                        if mpxs.aborted {
+                            // fcgi server is also done with it
+                            running_requests.remove(req_no as usize);
+                        }
                     }
                     _ if mpxs.aborted => {
                         //TODO send abort
