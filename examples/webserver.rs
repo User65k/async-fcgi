@@ -17,17 +17,24 @@ use async_fcgi::client::con_pool::ConPool;
 use bytes::{BufMut, Bytes, BytesMut};
 use http::Response;
 use http_body::Body as HTTPBody;
-use hyper::service::{make_service_fn, service_fn};
-use hyper::{Body, Request, Server};
+use hyper::service::service_fn;
+use hyper::Request;
+use log::error;
+use tokio::net::TcpListener;
 use std::collections::HashMap;
 use std::io::Error as IoError;
 use std::sync::Arc;
 use tokio::{runtime::Builder, sync::Mutex};
+use hyper_util::{
+    rt::{TokioExecutor, TokioIo},
+    server::conn::auto,
+};
 
 async fn fwd_to_fcgi(
     fcgi_app: Arc<Mutex<ConPool>>,
-    req: Request<Body>,
-) -> Result<Response<impl HTTPBody<Data = Bytes, Error = IoError>>, IoError> {
+    req: Request<hyper::body::Incoming>,
+)
+-> Result<Response<impl HTTPBody<Data = Bytes, Error = IoError>>, IoError> {
     let fcg = fcgi_app.lock().await;
 
     let mut file_path = BytesMut::from(&b"."[..]);
@@ -62,21 +69,29 @@ async fn amain() {
     match ConPool::new(&"127.0.0.1:9001".parse().unwrap()).await {
         Ok(fcgi_app) => {
             let fcgi_link = Arc::new(Mutex::new(fcgi_app));
-            let make_service = make_service_fn(move |_| {
-                let fcg = fcgi_link.clone();
-                async move {
-                    Ok::<_, hyper::Error>(service_fn(move |req: Request<Body>| {
-                        fwd_to_fcgi(fcg.clone(), req)
-                    }))
-                }
-            });
 
-            let in_addr = ([127, 0, 0, 1], 1337).into();
-            let server = Server::bind(&in_addr).serve(make_service);
+            let in_addr: std::net::SocketAddr = ([127, 0, 0, 1], 1337).into();
+            let listener = match TcpListener::bind(in_addr).await {
+                Ok(l) => l,
+                Err(e) => {
+                    error!("{}", e);
+                    return
+                },
+            };
             println!("Listening on http://{}", in_addr);
-
-            if let Err(e) = server.await {
-                eprintln!("server error: {}", e);
+            while let Ok((stream, _)) = listener.accept().await {
+                let io = TokioIo::new(stream);
+                let fcgi = fcgi_link.clone();
+                let make_service = service_fn(move |req: Request<hyper::body::Incoming>| {
+                    fwd_to_fcgi(fcgi.clone(), req)
+                });
+        
+                tokio::task::spawn(async move {
+                    if let Err(err) = auto::Builder::new(TokioExecutor::new()).serve_connection(io, make_service).await
+                    {
+                        println!("Error serving connection: {:?}", err);
+                    }
+                });
             }
         }
         Err(e) => {

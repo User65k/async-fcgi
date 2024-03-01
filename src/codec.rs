@@ -259,7 +259,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
         unsafe {
             buf.set_len(Header::HEADER_LEN);
         } //reserve space for header
-        while let Some(chunk) = body.data().await {
+        while let Some(chunk) = crate::client::connection::BodyExt::data(&mut body).await {
             if let Ok(mut b) = chunk {
                 //b: Buf
                 let val = b.copy_to_bytes(b.remaining());

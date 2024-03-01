@@ -11,7 +11,7 @@ Multiple Requests can be multiplexed on it.
 # use tokio::io::{AsyncReadExt, AsyncWriteExt};
 # use std::net::SocketAddr;
 use http::{Request, StatusCode};
-use http_body::{Body, Empty};
+use http_body::{Body};
 use bytes::Bytes;
 use async_fcgi::client::connection::Connection;
 
@@ -27,7 +27,7 @@ use async_fcgi::client::connection::Connection;
 #        app_socket.write_buf(&mut Bytes::from(&from_php[..])).await.unwrap();
 #    });
     let mut fcgi_con = Connection::connect(&"127.0.0.1:59000".parse()?, 1).await?;
-    let req = Request::get("/test?lol=1").header("Accept", "text/html").body(Empty::<Bytes>::new())?;
+    let req = Request::get("/test?lol=1").header("Accept", "text/html").body(String::new())?;
     let mut params = HashMap::new();
     params.insert(
         Bytes::from(&b"SCRIPT_FILENAME"[..]),
@@ -36,18 +36,16 @@ use async_fcgi::client::connection::Connection;
     let mut res = fcgi_con.forward(req, params).await?;
     assert_eq!(res.status(), StatusCode::NOT_FOUND);
     assert_eq!(res.headers().get("X-Powered-By").unwrap(), "PHP/7.3.16");
-    let read1 = res.data().await;
-    assert!(read1.is_some());
     # Ok(())
 # }
 ```
 */
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{
-    header::HeaderMap, header::AUTHORIZATION, header::CONTENT_LENGTH, header::CONTENT_TYPE,
+    header::AUTHORIZATION, header::CONTENT_LENGTH, header::CONTENT_TYPE,
     Request, Response, StatusCode,
 };
-use http_body::Body;
+use http_body::{Body, Frame};
 use slab::Slab;
 use std::marker::Unpin;
 
@@ -188,13 +186,11 @@ impl Connection {
     /// ```no_run
     /// # use std::error::Error;
     /// # use http::Request;
-    /// # use http_body::Empty;
-    /// # use bytes::Bytes;
     /// # use async_fcgi::client::connection::Connection;
     /// # #[tokio::main(flavor = "current_thread")]
     /// # async fn main() -> Result<(),Box<dyn Error>> {
     /// # let mut fcgi_con = Connection::connect(&"127.0.0.1:59000".parse()?, 1).await?;
-    /// let req = Request::get("/test?lol=1").header("Accept", "text/html").body(Empty::<Bytes>::new())?;
+    /// let req = Request::get("/test?lol=1").header("Accept", "text/html").body(String::new())?;
     /// let mut params = [(
     ///     &b"SCRIPT_FILENAME"[..],
     ///     &b"/home/daniel/Public/test.php"[..]
@@ -533,6 +529,40 @@ impl Connection {
     }
 }
 
+/// `Frame` from `http-body-util` but only returns data frames
+pub(crate) struct BodyDataFrame<'a, T: ?Sized>(pub(crate) &'a mut T);
+impl<'a, T: Body + Unpin + ?Sized> Future for BodyDataFrame<'a, T> {
+    type Output = Option<Result<T::Data, T::Error>>;
+
+    fn poll(mut self: Pin<&mut Self>, ctx: &mut Context<'_>) -> Poll<Self::Output> {
+        match Pin::new(&mut self.0).poll_frame(ctx) {
+            Poll::Ready(Some(Ok(a))) => {
+                if let Ok(d) = a.into_data() {
+                    Poll::Ready(Some(Ok(d)))
+                }else{
+                    ctx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+            },
+            Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending
+        }
+    }
+}
+pub(crate) trait BodyExt: Body {
+    /// Returns a future that resolves to the next [`Frame`], if any.
+    ///
+    /// [`Frame`]: combinators::Frame
+    fn data(&mut self) -> BodyDataFrame<'_, Self>
+    where
+        Self: Unpin,
+    {
+        BodyDataFrame(self)
+    }
+}
+impl<T: ?Sized> BodyExt for T where T: Body {}
+
 impl Future for InnerConnection {
     type Output = Option<Result<(), IoError>>;
 
@@ -654,10 +684,10 @@ impl Body for FCGIBody {
     type Data = Bytes;
     type Error = IoError;
     /// Get a chunk of STDOUT data from this FCGI application request stream
-    fn poll_data(
+    fn poll_frame(
         mut self: Pin<&mut Self>,
         cx: &mut Context,
-    ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         /*
         We need to read the socket because we
         a. are the only request
@@ -709,7 +739,7 @@ impl Body for FCGIBody {
 
                 if slab.buf.remaining() >= 1 {
                     trace!("body #{} has data and is {} closed", rid + 1, slab.ended);
-                    let retdata = Poll::Ready(Some(Ok(slab.buf.oldest().unwrap())));
+                    let retdata = Poll::Ready(Some(Ok(Frame::data(slab.buf.oldest().unwrap()))));
                     if was_returned && slab.ended && slab.buf.remaining() < 1 {
                         //ret rid of this as fast as possible,
                         //it blocks us and clients might stop reading
@@ -739,12 +769,6 @@ impl Body for FCGIBody {
                 }
             }
         }
-    }
-    fn poll_trailers(
-        self: Pin<&mut Self>,
-        _cx: &mut Context,
-    ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-        Poll::Ready(Ok(None))
     }
 }
 
@@ -860,21 +884,15 @@ mod tests {
     impl Body for TestBod {
         type Data = Bytes;
         type Error = IoError;
-        fn poll_data(
+        fn poll_frame(
             mut self: Pin<&mut Self>,
             _cx: &mut Context,
-        ) -> Poll<Option<Result<Self::Data, Self::Error>>> {
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
             let Self { ref mut l } = *self;
             match l.pop_front() {
                 None => Poll::Ready(None),
-                Some(i) => Poll::Ready(Some(Ok(i))),
+                Some(i) => Poll::Ready(Some(Ok(Frame::data(i)))),
             }
-        }
-        fn poll_trailers(
-            self: Pin<&mut Self>,
-            _cx: &mut Context,
-        ) -> Poll<Result<Option<HeaderMap>, Self::Error>> {
-            Poll::Ready(Ok(None))
         }
         fn size_hint(&self) -> SizeHint {
             let mut sh = SizeHint::default();
@@ -1141,8 +1159,8 @@ mod tests {
                 .body(b)
                 .unwrap();
             trace!("new req obj");
-            let mut params: HashMap<Bytes, Bytes> = HashMap::new();
-            let mut res = fcgi_con.forward(req, params).await.expect("forward failed");
+            let params: HashMap<Bytes, Bytes> = HashMap::new();
+            let res = fcgi_con.forward(req, params).await.expect("forward failed");
             trace!("got res obj");
             assert_eq!(res.status(), StatusCode::NOT_FOUND);
             m.await.unwrap();
