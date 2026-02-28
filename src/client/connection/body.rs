@@ -28,10 +28,12 @@ pub struct FCGIBody {
 
 impl Drop for FCGIBody {
     fn drop(&mut self) {
-        if let ServerState::Done(_) = self.transaction {
-            return;
-        }
         let rid = self.transaction.id() - 1;
+        if let ServerState::Running(r) =
+            core::mem::replace(&mut self.transaction, ServerState::Done(rid + 1))
+        {
+            drop(r); //aka abort
+        }
         debug!("Dropping FCGIBody #{}!", rid + 1);
         let con = self.con.clone();
         let _ = tokio::spawn(async move {
@@ -98,10 +100,10 @@ impl Body for FCGIBody {
         } = *self;
         let rid = transaction.id() - 1;
 
-        if let ServerState::Done(_) = transaction {
+        /*if let ServerState::Done(_) = transaction {
             debug!("body #{} is already done", rid + 1);
             return Poll::Ready(None);
-        }
+        }*/
 
         trace!("read resp body");
         let fut = con.lock();
@@ -122,15 +124,9 @@ impl Body for FCGIBody {
                         return Poll::Ready(None);
                     }
                 };
-
-                /*
-                if let Poll::Ready(Some(Err(e))) = con_stat {
-                    error!("body #{} (done: {}) err {}", rid, slab.ended, e);
-                    if !slab.ended {//unreachable
-                        //request is not done but an error occured
-                        return Poll::Ready(Some(Err(e)));
-                    }
-                }*/
+                if slab.ended {
+                    transaction.mark_done();
+                }
 
                 if slab.buf.has_remaining() {
                     trace!("body #{} has data and is {} closed", rid + 1, slab.ended);
@@ -140,7 +136,6 @@ impl Body for FCGIBody {
                         //it blocks us and clients might stop reading
                         trace!("next read on #{} will not have data -> release", rid + 1);
                         mut_inner.running_requests.remove(rid as usize);
-                        transaction.mark_done();
                     }
                     retdata
                 } else {
@@ -150,7 +145,6 @@ impl Body for FCGIBody {
                         debug!("body #{} is done", rid + 1);
                         if was_returned {
                             mut_inner.running_requests.remove(rid as usize);
-                            transaction.mark_done();
                         } else {
                             warn!("#{} closed before handover", rid + 1);
                         }

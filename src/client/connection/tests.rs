@@ -1,5 +1,5 @@
 use super::*;
-use crate::client::tests::{local_socket_pair, init_log, TestBod};
+use crate::client::tests::{init_log, local_socket_pair, TestBod};
 use http_body::{Frame, SizeHint};
 use std::collections::{HashMap, VecDeque};
 use tokio::{
@@ -7,7 +7,6 @@ use tokio::{
     net::TcpListener,
     runtime::Builder,
 };
-
 
 #[test]
 fn simple_get() {
@@ -69,7 +68,9 @@ fn simple_get() {
     }
     rt.block_on(con());
 }
-async fn send_empty_get(cp: &Connection) -> Result<Response<impl http_body::Body<Data = Bytes, Error = IoError>>, IoError> {
+async fn send_empty_get(
+    cp: &Connection,
+) -> Result<Response<impl http_body::Body<Data = Bytes, Error = IoError>>, IoError> {
     let b = TestBod { l: VecDeque::new() };
     let req = Request::get("/").body(b).unwrap();
     let params: HashMap<Bytes, Bytes> = HashMap::new();
@@ -333,7 +334,7 @@ fn drop_return_body() {
         assert_eq!(buf, Bytes::from(&to_php[..]));
         trace!("app answers on get");
         let from_php =
-            b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0";
+            b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0"; //no EndRequest
         app_socket
             .write_buf(&mut Bytes::from(&from_php[..]))
             .await

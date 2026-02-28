@@ -80,7 +80,6 @@ use inner::InnerConnection;
 mod body;
 use body::FCGIBody;
 
-
 /// Request stream
 ///
 /// Manages one request from
@@ -111,7 +110,12 @@ impl Drop for ServerRequestId {
         let ServerRequestId { id, con } = self;
         let con = con.clone();
         let id = *id;
-        let _ = tokio::spawn(async move { con.lock().await.abort_req(id).await });
+        let _ = tokio::spawn(async move {
+            let mut con = con.lock().await;
+            if con.running_requests.contains((id - 1) as usize) {
+                let _ = con.abort_req(id).await;
+            }
+        });
     }
 }
 /// Single transport connection to a FCGI application
@@ -511,9 +515,7 @@ impl Connection {
         &self,
         transaction: ServerRequestId,
     ) -> Result<Response<impl Body<Data = Bytes, Error = IoError>>, IoError> {
-        let mut fcgibody = FCGIBody::new(
-            Arc::clone(&self.inner),
-            transaction);
+        let mut fcgibody = FCGIBody::new(Arc::clone(&self.inner), transaction);
         let mut rb = Response::builder();
         let mut rheaders = rb.headers_mut().unwrap();
         let mut status = StatusCode::OK;

@@ -19,14 +19,13 @@ pub(crate) mod tests {
         let a: Addr = app_listener.local_addr()?.into();
         Ok((app_listener, a))
     }
+    use bytes::{Buf, Bytes};
     use http_body::{Frame, SizeHint};
     use std::collections::VecDeque;
-    use std::task::{Poll, Context};
     use std::pin::Pin;
-    use bytes::{Buf, Bytes};
-    
-    use http_body::Body;
+    use std::task::{Context, Poll};
 
+    use http_body::Body;
     pub struct TestBod {
         pub l: VecDeque<Bytes>,
     }
