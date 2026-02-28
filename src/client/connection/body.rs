@@ -20,10 +20,10 @@ use tokio::sync::Mutex;
 /// STDERR is logged using [log::error](https://doc.rust-lang.org/1.1.0/log/macro.error!.html)
 pub struct FCGIBody {
     ///where to read
-    pub con: Arc<Mutex<InnerConnection>>,
+    con: Arc<Mutex<InnerConnection>>,
     //request is no longer polled by forward
     pub was_returned: bool,
-    pub transaction: ServerState,
+    transaction: ServerState,
 }
 
 impl Drop for FCGIBody {
