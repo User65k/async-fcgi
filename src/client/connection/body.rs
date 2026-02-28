@@ -1,32 +1,18 @@
 use super::{InnerConnection, ServerState};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use http::{
-    header::AUTHORIZATION, header::CONTENT_LENGTH, header::CONTENT_TYPE,
-    Request, Response, StatusCode,
-};
+use bytes::{Buf, Bytes};
 use http_body::{Body, Frame};
-use slab::Slab;
-use std::fmt::Display;
-use std::marker::Unpin;
 
-use log::{debug, error, info, log_enabled, trace, warn, Level::Trace};
+use log::{debug, trace, warn};
 
-use std::future::Future;
-use std::io::{Error as IoError, ErrorKind};
-use std::iter::IntoIterator;
-use std::ops::Drop;
-use std::pin::Pin;
-use std::sync::{Arc, Weak};
-use std::task::Waker;
-use std::task::{Context, Poll};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-
-use crate::bufvec::BufList;
-use crate::codec::{FCGIType, FCGIWriter};
-use crate::fastcgi;
-use crate::httpparse::{parse, ParseResult};
-use async_stream_connection::{Addr, Stream};
-use tokio::io::{AsyncBufRead, BufReader};
+use std::{
+    future::Future,
+    io::Error as IoError,
+    ops::Drop,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
+use tokio::sync::Mutex;
 
 /// [http_body](https://docs.rs/http-body/0.3.1/http_body/trait.Body.html) type for FCGI.
 ///
@@ -37,7 +23,7 @@ pub struct FCGIBody {
     pub con: Arc<Mutex<InnerConnection>>,
     //request is no longer polled by forward
     pub was_returned: bool,
-    pub transaction: ServerState
+    pub transaction: ServerState,
 }
 
 impl Drop for FCGIBody {
@@ -45,11 +31,11 @@ impl Drop for FCGIBody {
         if let ServerState::Done(_) = self.transaction {
             return;
         }
-        let rid = self.transaction.id()-1;
+        let rid = self.transaction.id() - 1;
         debug!("Dropping FCGIBody #{}!", rid + 1);
         let con = self.con.clone();
         let _ = tokio::spawn(async move {
-            let req = con.lock().await.running_requests.remove(rid as usize);
+            let _req = con.lock().await.running_requests.remove(rid as usize);
         });
     }
 }
@@ -73,9 +59,9 @@ impl Body for FCGIBody {
         let Self {
             ref con,
             was_returned,
-            ref mut transaction
+            ref mut transaction,
         } = *self;
-        let rid = transaction.id()-1;
+        let rid = transaction.id() - 1;
 
         if let ServerState::Done(_) = transaction {
             debug!("body #{} is already done", rid + 1);

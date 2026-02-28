@@ -40,34 +40,45 @@ use async_fcgi::client::connection::Connection;
 # }
 ```
 */
+use crate::{
+    bufvec::BufList,
+    codec::{FCGIType, FCGIWriter},
+    fastcgi,
+    httpparse::{parse, ParseResult},
+};
+use async_stream_connection::{Addr, Stream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{
-    header::AUTHORIZATION, header::CONTENT_LENGTH, header::CONTENT_TYPE,
-    Request, Response, StatusCode,
+    header::AUTHORIZATION, header::CONTENT_LENGTH, header::CONTENT_TYPE, Request, Response,
+    StatusCode,
 };
-use http_body::{Body, Frame};
+use http_body::Body;
+use log::{debug, error, info, trace};
 use slab::Slab;
-use std::fmt::Display;
-use std::marker::Unpin;
+use std::{
+    fmt::Display,
+    future::Future,
+    io::{Error as IoError, ErrorKind},
+    iter::IntoIterator,
+    marker::Unpin,
+    ops::Drop,
+    pin::Pin,
+    sync::Arc,
+    task::{
+        Waker, {Context, Poll},
+    },
+};
+use tokio::{
+    io::{AsyncBufRead, BufReader},
+    sync::{Mutex, OwnedSemaphorePermit, Semaphore},
+};
 
-use log::{debug, error, info, log_enabled, trace, warn, Level::Trace};
-
-use std::future::Future;
-use std::io::{Error as IoError, ErrorKind};
-use std::iter::IntoIterator;
-use std::ops::Drop;
-use std::pin::Pin;
-use std::sync::{Arc, Weak};
-use std::task::Waker;
-use std::task::{Context, Poll};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
-
-use crate::bufvec::BufList;
-use crate::codec::{FCGIType, FCGIWriter};
-use crate::fastcgi;
-use crate::httpparse::{parse, ParseResult};
-use async_stream_connection::{Addr, Stream};
-use tokio::io::{AsyncBufRead, BufReader};
+mod inner;
+#[cfg(test)]
+mod tests;
+use inner::InnerConnection;
+mod body;
+use body::FCGIBody;
 
 /// state of the body
 enum ServerState {
@@ -75,7 +86,7 @@ enum ServerState {
     Done(u16),
     /// the server is still sending answers.
     /// We can abort
-    Running(ServerRequestId)
+    Running(ServerRequestId),
 }
 impl ServerState {
     pub fn id(&self) -> u16 {
@@ -87,7 +98,7 @@ impl ServerState {
     /// this is done
     pub fn mark_done(&mut self) {
         match core::mem::replace(self, ServerState::Done(self.id())) {
-            ServerState::Done(_) => {},
+            ServerState::Done(_) => {}
             ServerState::Running(server_request_id) => server_request_id.mark_complete(),
         };
     }
@@ -119,12 +130,10 @@ impl ServerRequestId {
 }
 impl Drop for ServerRequestId {
     fn drop(&mut self) {
-        let ServerRequestId {id, con} = self;
+        let ServerRequestId { id, con } = self;
         let con = con.clone();
         let id = *id;
-        let _ = tokio::spawn(async move {
-            con.lock().await.abort_req(id).await
-        });
+        let _ = tokio::spawn(async move { con.lock().await.abort_req(id).await });
     }
 }
 /// Single transport connection to a FCGI application
@@ -137,7 +146,12 @@ pub struct Connection {
     header_mul: MultiHeaderStrategy,
     header_nl: HeaderMultilineStrategy,
 }
-pub(crate) struct PreparedConnection((OwnedSemaphorePermit, tokio::sync::OwnedMutexGuard<InnerConnection>));
+pub(crate) struct PreparedConnection(
+    (
+        OwnedSemaphorePermit,
+        tokio::sync::OwnedMutexGuard<InnerConnection>,
+    ),
+);
 /// Specifies how to handle multiple HTTP Headers
 #[derive(Copy, Clone)]
 pub enum MultiHeaderStrategy {
@@ -159,10 +173,7 @@ pub enum HeaderMultilineStrategy {
 impl Connection {
     /// Connect to a peer with [`MultiHeaderStrategy::OnlyFirst`] & [`HeaderMultilineStrategy::Ignore`].
     #[inline]
-    pub async fn connect(
-        addr: &Addr,
-        max_req_per_con: u16,
-    ) -> Result<Connection, IoError> {
+    pub async fn connect(addr: &Addr, max_req_per_con: u16) -> Result<Connection, IoError> {
         Self::connect_with_strategy(
             addr,
             max_req_per_con,
@@ -270,9 +281,7 @@ impl Connection {
         self.send_request(req, dyn_headers, con_slot).await
     }
     /// get the connection in a state where it can start a new request
-    pub(crate) async fn prep_connection(&self)
-        -> Result<PreparedConnection, IoError>
-    {
+    pub(crate) async fn prep_connection(&self) -> Result<PreparedConnection, IoError> {
         info!("new request pending");
         let _permit = self
             .sem
@@ -320,7 +329,6 @@ impl Connection {
                 waker: None,
                 ended: false,
                 _permit,
-               
             };
             rr.insert(pending);
             rid
@@ -335,7 +343,10 @@ impl Connection {
         };
         mut_inner.io.encode(br).await?;
         //cancel the request if this Fut or the returned body is dropped before it is read completely
-        let transaction = ServerRequestId { id: rid, con: self.inner.clone() };
+        let transaction = ServerRequestId {
+            id: rid,
+            con: self.inner.clone(),
+        };
         //Prepare the CGI headers
         let mut kvw = mut_inner.io.kv_stream(rid, fastcgi::RecordType::Params);
 
@@ -428,10 +439,11 @@ impl Connection {
                     None => Self::NULL,
                 },
             };
-            if let HeaderMultilineStrategy::ReturnError = self.header_nl {//http::HeaderValue does not allow this anyway
+            if let HeaderMultilineStrategy::ReturnError = self.header_nl {
+                //http::HeaderValue does not allow this anyway
                 if value.as_ref().contains(&b'\n') {
                     drop(kvw); //stop mid stream
-                    //abort request by dropping transaction
+                               //abort request by dropping transaction
                     return Err(IoError::new(
                         ErrorKind::InvalidData,
                         "multiline headers are not allowed",
@@ -449,8 +461,10 @@ impl Connection {
             drop(mut_inner); // close mutex before create_response or/and send_body
                              // send the body to the FCGI App
                              // and read responses
-            let (_, res) =
-                tokio::try_join!(self.send_body(rid, len, body), self.create_response(transaction))?;
+            let (_, res) = tokio::try_join!(
+                self.send_body(rid, len, body),
+                self.create_response(transaction)
+            )?;
             Ok(res)
         } else {
             //send end of STDIN
@@ -471,7 +485,7 @@ impl Connection {
     ) -> Result<(), IoError>
     where
         B: Body + Unpin,
-        B::Error: Display
+        B::Error: Display,
     {
         //stream as body comes in
         while let Some(chunk) = body.data().await {
@@ -489,10 +503,8 @@ impl Connection {
                         .io
                         .flush_data_chunk(data, request_id, fastcgi::RecordType::StdIn)
                         .await?;
-                },
-                Err(e) => {
-                    return Err(IoError::other(e.to_string()))
                 }
+                Err(e) => return Err(IoError::other(e.to_string())),
             }
         }
         //CGI1.1 4.2 -> at least content-length data
@@ -519,12 +531,12 @@ impl Connection {
     /// Parse the Headers and return a body that streams the rest
     async fn create_response(
         &self,
-        transaction: ServerRequestId
+        transaction: ServerRequestId,
     ) -> Result<Response<impl Body<Data = Bytes, Error = IoError>>, IoError> {
         let mut fcgibody = FCGIBody {
             con: Arc::clone(&self.inner),
             was_returned: false,
-            transaction: ServerState::Running(transaction)
+            transaction: ServerState::Running(transaction),
         };
         let mut rb = Response::builder();
         let mut rheaders = rb.headers_mut().unwrap();
@@ -533,46 +545,46 @@ impl Connection {
         let mut buf: Option<Bytes> = None;
         while let Some(rbuf) = fcgibody.data().await {
             let mut b = rbuf?;
-                if let Some(left) = buf.take() {
-                    //we have old data -> concat
-                    let mut c = BytesMut::with_capacity(left.len() + b.len());
-                    c.put(left);
-                    c.put(b);
-                    b = c.freeze();
-                }
-                match parse(b.clone(), &mut rheaders) {
-                    ParseResult::Ok(bodydata) => {
-                        trace!("read body fragment: {:?}", &bodydata);
-                        if bodydata.has_remaining() {
-                            let mut mut_inner = self.inner.lock().await;
-                            //was_returned prevents: request might already be done and gone
-                            mut_inner.running_requests[fcgibody.transaction.id() as usize -1]
-                                .buf
-                                .push(bodydata);
-                        }
+            if let Some(left) = buf.take() {
+                //we have old data -> concat
+                let mut c = BytesMut::with_capacity(left.len() + b.len());
+                c.put(left);
+                c.put(b);
+                b = c.freeze();
+            }
+            match parse(b.clone(), &mut rheaders) {
+                ParseResult::Ok(bodydata) => {
+                    trace!("read body fragment: {:?}", &bodydata);
+                    if bodydata.has_remaining() {
+                        let mut mut_inner = self.inner.lock().await;
+                        //was_returned prevents: request might already be done and gone
+                        mut_inner.running_requests[fcgibody.transaction.id() as usize - 1]
+                            .buf
+                            .push(bodydata);
+                    }
 
-                        if let Some(stat) = rheaders.get("Status") {
-                            //CGI1.1
-                            //info!("Status header: {:?}", stat);
-                            if stat.len() >= 3 {
-                                if let Ok(s) = StatusCode::from_bytes(&stat.as_bytes()[..3][..]) {
-                                    status = s;
-                                }
+                    if let Some(stat) = rheaders.get("Status") {
+                        //CGI1.1
+                        //info!("Status header: {:?}", stat);
+                        if stat.len() >= 3 {
+                            if let Ok(s) = StatusCode::from_bytes(&stat.as_bytes()[..3][..]) {
+                                status = s;
                             }
                         }
-                        //Location header for local URIs (starting with "/") -> must be done in Webserver
-                        break;
                     }
-                    ParseResult::Pending => {
-                        //read more
-                        buf = Some(b);
-                        trace!("header pending");
-                    }
-                    ParseResult::Err => {
-                        status = StatusCode::INTERNAL_SERVER_ERROR;
-                        break;
-                    }
+                    //Location header for local URIs (starting with "/") -> must be done in Webserver
+                    break;
                 }
+                ParseResult::Pending => {
+                    //read more
+                    buf = Some(b);
+                    trace!("header pending");
+                }
+                ParseResult::Err => {
+                    status = StatusCode::INTERNAL_SERVER_ERROR;
+                    break;
+                }
+            }
         }
         fcgibody.was_returned = true;
         debug!("resp header parsing done");
@@ -597,14 +609,14 @@ impl<'a, T: Body + Unpin + ?Sized> Future for BodyDataFrame<'a, T> {
             Poll::Ready(Some(Ok(a))) => {
                 if let Ok(d) = a.into_data() {
                     Poll::Ready(Some(Ok(d)))
-                }else{
+                } else {
                     ctx.waker().wake_by_ref();
                     Poll::Pending
                 }
-            },
+            }
             Poll::Ready(Some(Err(e))) => Poll::Ready(Some(Err(e))),
             Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending
+            Poll::Pending => Poll::Pending,
         }
     }
 }
@@ -621,17 +633,8 @@ pub(crate) trait BodyExt: Body {
 }
 impl<T: ?Sized> BodyExt for T where T: Body {}
 
-
 impl Drop for FCGIRequest {
     fn drop(&mut self) {
         debug!("Req mplex id free");
     }
 }
-
-
-#[cfg(test)]
-mod tests;
-mod inner;
-use inner::InnerConnection;
-mod body;
-use body::FCGIBody;

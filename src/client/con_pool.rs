@@ -10,32 +10,34 @@
 [`ConPool`]: ./struct.ConPool.html
 [`Connection`]: ../connection/index.html
 */
-
-use crate::client::connection::{Connection, MultiHeaderStrategy, HeaderMultilineStrategy, PreparedConnection};
-use crate::codec::FCGIWriter;
-use crate::fastcgi::{Body, Record, MAX_CONNS, MAX_REQS, MPXS_CONNS, RecordType};
+use crate::{
+    client::connection::{
+        Connection, HeaderMultilineStrategy, MultiHeaderStrategy, PreparedConnection,
+    },
+    codec::FCGIWriter,
+    fastcgi::{Body, Record, RecordType, MAX_CONNS, MAX_REQS, MPXS_CONNS},
+};
 use async_stream_connection::{Addr, Stream};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Request, Response};
 use http_body::Body as HttpBody;
 use log::{info, trace};
-use std::fmt::{self, Display};
-use std::io::Error as IoError;
-use std::iter::IntoIterator;
-use tokio::io::AsyncReadExt;
-use std::future::Future;
-use std::pin::{Pin, pin};
-use std::task::{Context, Poll};
-use tokio::sync::RwLock;
+use std::{
+    fmt::{self, Display},
+    future::Future,
+    io::Error as IoError,
+    iter::IntoIterator,
+    pin::{pin, Pin},
+    task::{Context, Poll},
+};
+use tokio::{io::AsyncReadExt, sync::RwLock};
 
 #[cfg(all(unix, feature = "app_start"))]
 use async_stream_connection::Listener;
-#[cfg(feature = "app_start")]
-use std::ffi::OsStr;
 #[cfg(all(unix, feature = "app_start"))]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 #[cfg(feature = "app_start")]
-use std::process::Stdio;
+use std::{ffi::OsStr, process::Stdio};
 #[cfg(feature = "app_start")]
 use tokio::process::Command;
 
@@ -112,7 +114,7 @@ impl ConPool {
             "App supports {} connections with {} requests",
             max_cons, max_req_per_con
         );
-        let mut c = ConPool {
+        let c = ConPool {
             sock_addr: sock_addr.clone(),
             header_mul,
             header_nl,
@@ -130,8 +132,9 @@ impl ConPool {
             &self.sock_addr,
             self.max_req_per_con,
             self.header_mul,
-            self.header_nl
-        ).await
+            self.header_nl,
+        )
+        .await
     }
     /// Forwards an HTTP request to a FGCI Application.
     /// Calls [`Connection::forward`] on an available connection.
@@ -154,20 +157,18 @@ impl ConPool {
             let con_pool = self.con_pool.read().await;
             let nu_con = if max_cons > con_pool.len() {
                 Some(Box::pin(self.new_con()))
-            }else{
+            } else {
                 None
             };
-            let waiting = con_pool.iter().map(|c|Box::pin(c.prep_connection())).collect();
-            RaceConnections {
-                nu_con,
-                waiting,
-            }.await
+            let waiting = con_pool
+                .iter()
+                .map(|c| Box::pin(c.prep_connection()))
+                .collect();
+            RaceConnections { nu_con, waiting }.await
         };
         let con_pool = self.con_pool.read().await;
         let (con, slot) = match rc {
-            Ok(Raced::Prep((i, slot))) => {
-                (con_pool.get(i).unwrap(), slot)
-            },
+            Ok(Raced::Prep((i, slot))) => (con_pool.get(i).unwrap(), slot),
             Ok(Raced::New(con)) => {
                 self.con_pool.write().await.push(con);
                 let con = con_pool.last().unwrap();
@@ -200,20 +201,20 @@ fn parse_int<I: std::str::FromStr>(bytes: Bytes) -> Option<I> {
 }
 enum Raced {
     Prep((usize, PreparedConnection)),
-    New(Connection)
+    New(Connection),
 }
 struct RaceConnections<FutNew, FutWait>
-where 
-    FutNew: Future<Output=Result<Connection, IoError>>,
-    FutWait: Future<Output=Result<PreparedConnection, IoError>>
+where
+    FutNew: Future<Output = Result<Connection, IoError>>,
+    FutWait: Future<Output = Result<PreparedConnection, IoError>>,
 {
     nu_con: Option<Pin<Box<FutNew>>>,
-    waiting: Vec<Pin<Box<FutWait>>>
+    waiting: Vec<Pin<Box<FutWait>>>,
 }
 impl<FutNew, FutWait> Future for RaceConnections<FutNew, FutWait>
-where 
-    FutNew: Future<Output=Result<Connection, IoError>>,
-    FutWait: Future<Output=Result<PreparedConnection, IoError>>
+where
+    FutNew: Future<Output = Result<Connection, IoError>>,
+    FutWait: Future<Output = Result<PreparedConnection, IoError>>,
 {
     type Output = Result<Raced, IoError>;
 
@@ -227,11 +228,11 @@ where
                     last_err = Some(e);
                     self.as_mut().nu_con = None;
                     cx.waker().wake_by_ref();
-                },
+                }
                 Poll::Ready(Ok(con)) => {
                     return Poll::Ready(Ok(Raced::New(con)));
-                },
-                Poll::Pending => {},
+                }
+                Poll::Pending => {}
             }
         }
         for (x, pc) in self.as_mut().waiting.iter_mut().enumerate() {
@@ -241,19 +242,19 @@ where
                     log::error!("Error when preping: {}", &e);
                     last_err = Some(e);
                     cx.waker().wake_by_ref();
-                },
+                }
                 Poll::Ready(Ok(con)) => {
-                    return Poll::Ready(Ok(Raced::Prep((x,con))));
-                },
-                Poll::Pending => {},
+                    return Poll::Ready(Ok(Raced::Prep((x, con))));
+                }
+                Poll::Pending => {}
             }
         }
         if let Some(e) = last_err.take() {
             Poll::Ready(Err(e))
-        }else{
+        } else {
             Poll::Pending
         }
-    }    
+    }
 }
 
 /// Note: only use this if there are no requests pending

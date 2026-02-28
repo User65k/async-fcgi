@@ -1,6 +1,6 @@
 use super::*;
 use crate::client::tests::local_socket_pair;
-use http_body::SizeHint;
+use http_body::{Frame, SizeHint};
 use std::collections::{HashMap, VecDeque};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -343,7 +343,7 @@ fn drop_or_fail_during_send_body() {
         let mut res = fcgi_con.forward(req, params).await;
         trace!("got res obj");
         let Err(res) = res else {
-            assert_eq!(1,2);
+            assert_eq!(1, 2);
             return;
         };
         assert_eq!(res.kind(), std::io::ErrorKind::Other);
@@ -352,7 +352,8 @@ fn drop_or_fail_during_send_body() {
     rt.block_on(con());
 }
 #[test]
-fn drop_return_body() {//dont consume entire return body
+fn drop_return_body() {
+    //dont consume entire return body
     init_log();
     // Create the runtime
     let rt = Builder::new_current_thread().enable_all().build().unwrap();
@@ -364,7 +365,8 @@ fn drop_return_body() {//dont consume entire return body
         let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0!\x07\0\x0c\0QUERY_STRING\x0e\x03REQUEST_METHODGET\x01\x04\0\x01\0!\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
         assert_eq!(buf, Bytes::from(&to_php[..]));
         trace!("app answers on get");
-        let from_php = b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0";
+        let from_php =
+            b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0";
         app_socket
             .write_buf(&mut Bytes::from(&from_php[..]))
             .await
@@ -384,15 +386,13 @@ fn drop_return_body() {//dont consume entire return body
         let fcgi_con = Connection::connect(&a, 1).await.unwrap();
         trace!("new connection obj");
         let b = TestBod { l: VecDeque::new() };
-        let req = Request::get("/")
-            .body(b)
-            .unwrap();
+        let req = Request::get("/").body(b).unwrap();
         trace!("new req obj");
         let params: HashMap<Bytes, Bytes> = HashMap::new();
         let mut res = fcgi_con.forward(req, params).await.expect("forward failed");
         trace!("got res obj");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
-        
+
         //do not read the body
         drop(res);
 
@@ -415,7 +415,7 @@ fn drop_request_instantly() {
 
         if buf.ends_with(b"\x01\x02\0\x01\0\0\0\0") {
             //all good
-        }else{
+        } else {
             buf.clear();
             app_socket.read_buf(&mut buf).await.unwrap();
             trace!("app read {:?}", buf);
@@ -432,9 +432,7 @@ fn drop_request_instantly() {
         let fcgi_con = Connection::connect(&a, 1).await.unwrap();
         trace!("new connection obj");
         let b = TestBod { l: VecDeque::new() };
-        let req = Request::get("/")
-            .body(b)
-            .unwrap();
+        let req = Request::get("/").body(b).unwrap();
         trace!("new req obj");
         let params: HashMap<Bytes, Bytes> = HashMap::new();
         //let params = std::iter::repeat_n((&b"aaaaaaaa"[..],&b"bbbbbbbbbbbbbbbbbbb"[..]), 400);
@@ -447,9 +445,9 @@ fn drop_request_instantly() {
     struct PollOnce<F: Future>(F);
     impl<F: Future> Future for PollOnce<F> {
         type Output = Option<F::Output>;
-    
+
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            match unsafe{Pin::new_unchecked(&mut self.get_unchecked_mut().0)}.poll(cx) {
+            match unsafe { Pin::new_unchecked(&mut self.get_unchecked_mut().0) }.poll(cx) {
                 Poll::Ready(r) => Poll::Ready(Some(r)),
                 Poll::Pending => Poll::Ready(None),
             }

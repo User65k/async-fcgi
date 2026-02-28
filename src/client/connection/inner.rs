@@ -1,31 +1,21 @@
-use super::{FCGIRequest};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use http::{
-    header::AUTHORIZATION, header::CONTENT_LENGTH, header::CONTENT_TYPE,
-    Request, Response, StatusCode,
-};
-use http_body::{Body, Frame};
+use super::FCGIRequest;
+use bytes::{Buf, Bytes};
 use slab::Slab;
-use std::fmt::Display;
-use std::marker::Unpin;
 
 use log::{debug, error, info, log_enabled, trace, warn, Level::Trace};
 
-use std::future::Future;
-use std::io::{Error as IoError, ErrorKind};
-use std::iter::IntoIterator;
-use std::ops::Drop;
-use std::pin::Pin;
-use std::sync::{Arc, Weak};
-use std::task::Waker;
-use std::task::{Context, Poll};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use std::{
+    future::Future,
+    io::{Error as IoError, ErrorKind},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-use crate::bufvec::BufList;
-use crate::codec::{FCGIType, FCGIWriter};
-use crate::fastcgi;
-use crate::httpparse::{parse, ParseResult};
-use async_stream_connection::{Addr, Stream};
+use crate::{
+    codec::{FCGIType, FCGIWriter},
+    fastcgi,
+};
+use async_stream_connection::Stream;
 use tokio::io::{AsyncBufRead, BufReader};
 
 /// Shared object to read from a `Connection`
@@ -57,7 +47,10 @@ impl InnerConnection {
     /// drive this connection
     /// Read, parse and distribute data from the socket.
     /// return None if the connection was closed
-    pub fn poll_resp(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Result<(), IoError>>> {
+    pub fn poll_resp(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context,
+    ) -> Poll<Option<Result<(), IoError>>> {
         let Self {
             ref mut io,
             ref mut running_requests,
@@ -109,7 +102,7 @@ impl InnerConnection {
             Poll::Ready(Some(Ok(())))
         }
     }
-    
+
     /// Something happened. We are done with everything
     pub fn notify_everyone(&mut self) {
         for (rid, mpxs) in self.running_requests.iter_mut() {
