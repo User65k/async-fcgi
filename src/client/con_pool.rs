@@ -23,23 +23,14 @@ use http::{Request, Response};
 use http_body::Body as HttpBody;
 use log::{info, trace};
 use std::{
-    fmt::{self, Display},
-    future::Future,
-    io::Error as IoError,
-    iter::IntoIterator,
-    pin::{pin, Pin},
-    task::{Context, Poll},
+    fmt::{self, Display}, future::Future, io::Error as IoError, iter::IntoIterator, pin::{Pin, pin}, sync::atomic::{AtomicUsize, Ordering}, task::{Context, Poll}
 };
-use tokio::{io::AsyncReadExt, sync::RwLock};
+use tokio::{io::AsyncReadExt, sync::RwLock, task::{JoinHandle, JoinSet, LocalSet}};
 
-#[cfg(all(unix, feature = "app_start"))]
-use async_stream_connection::Listener;
-#[cfg(all(unix, feature = "app_start"))]
-use std::os::unix::io::{AsRawFd, FromRawFd};
 #[cfg(feature = "app_start")]
-use std::{ffi::OsStr, process::Stdio};
-#[cfg(feature = "app_start")]
-use tokio::process::Command;
+mod app_start;
+#[cfg(test)]
+mod tests;
 
 /// manage a pool of [`Connection`]s to an Server.
 pub struct ConPool {
@@ -51,6 +42,8 @@ pub struct ConPool {
     max_req_per_con: u16,
     /// The maximum number of concurrent requests this application will accept
     con_pool: RwLock<Vec<Connection>>,
+    /// no of new connections pending
+    connecting: AtomicUsize
 }
 impl ConPool {
     /// Connect to a FCGI server / application with [`MultiHeaderStrategy::OnlyFirst`] & [`HeaderMultilineStrategy::Ignore`].
@@ -121,6 +114,7 @@ impl ConPool {
             max_cons,
             max_req_per_con,
             con_pool: RwLock::new(Vec::with_capacity(max_cons as usize)),
+            connecting: AtomicUsize::new(0)
         };
         /*let con = c.new_con().await?;
         c.con_pool.write().await.push(con);*/
@@ -155,36 +149,56 @@ impl ConPool {
         let rc = {
             let max_cons = self.max_cons as usize;
             let con_pool = self.con_pool.read().await;
-            let nu_con = if max_cons > con_pool.len() {
+            let con_pool_len = con_pool.len();
+            let nu_con = if let Ok(_) = self.connecting.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+                if max_cons > con_pool_len + x {
+                    Some(x + 1)
+                }else{
+                    None
+                }
+            }) {
                 trace!(
-                    "opening additional connection #{}/{}",
-                    con_pool.len() + 1,
-                    max_cons
+                    "opening additional connection #{}/{} {:?}, {}",
+                    con_pool_len + 1,
+                    max_cons,
+                    req.uri().query(),
+                    self.connecting.load(Ordering::Relaxed)
                 );
                 Some(Box::pin(self.new_con()))
             } else {
                 None
             };
-            let waiting = con_pool
+            let waiting = if con_pool_len == 0 {
+                drop(con_pool);
+                vec![]
+            }else{
+                con_pool
                 .iter()
                 .map(|c| Box::pin(c.prep_connection()))
-                .collect();
+                .collect()
+            };
             RaceConnections { nu_con, waiting }.await
         };
         match rc {
             Ok(Raced::Prep((i, slot))) => {
-                trace!("using con {}", i);
-                let con_pool = self.con_pool.read().await;
-                let con = con_pool.get(i).unwrap();
-                return con.send_request(req, dyn_headers, slot).await;
+                trace!("using con {} {:?}", i, req.uri().query());
+                self.connecting.fetch_add(1, Ordering::Relaxed);
+                let con = self.con_pool.write().await.swap_remove(i);
+                //let con_pool = self.con_pool.read().await;
+                //let con = con_pool.get(i).unwrap();
+                let res = con.send_request(req, dyn_headers, slot).await;
+                self.con_pool.write().await.push(con);
+                self.connecting.fetch_sub(1, Ordering::Relaxed);
+                res
             }
             Ok(Raced::New(con)) => {
-                self.con_pool.write().await.push(con);
-                let con_pool = self.con_pool.read().await;
-                let con = con_pool.last().unwrap();
+                trace!("new con estab {:?}", req.uri().query());                
                 let slot = con.prep_connection().await?;
-                trace!("using new con");
-                return con.send_request(req, dyn_headers, slot).await;
+                trace!("using new con {:?}", req.uri().query());
+                let res = con.send_request(req, dyn_headers, slot).await;
+                self.con_pool.write().await.push(con);
+                self.connecting.fetch_sub(1, Ordering::Relaxed);
+                res
             }
             Err(e) => {
                 return Err(e);
@@ -200,6 +214,7 @@ impl fmt::Debug for ConPool {
             .finish()
     }
 }
+//mod pool;
 
 fn parse_int<I: std::str::FromStr>(bytes: Bytes) -> Option<I> {
     if let Ok(s) = std::str::from_utf8(bytes.chunk()) {
@@ -288,245 +303,4 @@ async fn send_and_receive(stream: &mut FCGIWriter<Stream>) -> Result<Vec<Record>
     }
 
     Ok(recs)
-}
-
-#[cfg(feature = "app_start")]
-#[cfg_attr(docsrs, doc(cfg(feature = "app_start")))]
-impl ConPool {
-    /// Setup a [`Command`] to spin up a FCGI server / application
-    /// and make it listen on `sock_addr`.
-    /// ```no_run
-    /// # use async_fcgi::{client::con_pool::ConPool,FCGIAddr};
-    /// # use std::collections::HashMap;
-    /// # use std::error::Error;
-    /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() -> Result<(),Box<dyn Error>> {
-    /// let mut env = HashMap::new();
-    /// env.insert("PHP_FCGI_CHILDREN", "16");
-    /// env.insert("PHP_FCGI_MAX_REQUESTS", "10000");
-    /// let addr: FCGIAddr = "127.0.0.1:1236".parse()?;
-    /// let php = ConPool::prep_server("/usr/bin/php-cgi7.4", &addr)
-    ///             .await?
-    ///             .env_clear().envs(env)
-    ///             .spawn()?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn prep_server<S>(program: S, sock_addr: &Addr) -> Result<Command, IoError>
-    where
-        S: AsRef<OsStr>,
-    {
-        // The Web server leaves a single file descriptor, FCGI_LISTENSOCK_FILENO, open when the application begins execution.
-        // This descriptor refers to a listening socket created by the Web server.
-        #[cfg(not(unix))]
-        let stdin = Stdio::null();
-        #[cfg(unix)]
-        let stdin = {
-            let l = Listener::bind(sock_addr).await?;
-            let fd = unsafe { Stdio::from_raw_fd(l.as_raw_fd()) };
-            std::mem::forget(l); // FCGI App closes this - at least php-cgi7.4 does it
-            fd
-        };
-
-        let mut command = Command::new(program);
-        command
-                .stdin(stdin) // FCGI_LISTENSOCK_FILENO equals STDIN_FILENO.
-                //.stdout(Stdio::null()).stderr(Stdio::null()) // The standard descriptors STDOUT_FILENO and STDERR_FILENO are closed when the application begins execution.
-                ;
-        Ok(command)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::client::tests::{init_log, local_socket_pair, TestBod};
-    use http::StatusCode;
-    use std::collections::HashMap;
-    use std::collections::VecDeque;
-    use std::iter::FromIterator;
-    use std::process::ExitStatus;
-    use tokio::io::AsyncWriteExt;
-    use tokio::runtime::Builder;
-
-    #[cfg(feature = "app_start")]
-    #[test]
-    fn start_app() {
-        let rt = Builder::new_current_thread().enable_all().build().unwrap();
-        async fn spawn() {
-            let mut env = HashMap::new();
-            env.insert("PATH", "/usr/bin");
-            let a: Addr = "/tmp/jo".parse().unwrap();
-            let s: ExitStatus = ConPool::prep_server("ls", &a)
-                .await
-                .expect("prep_server error")
-                .args(&["-l", "-a"])
-                .env_clear()
-                .envs(env)
-                .status()
-                .await
-                .expect("ls failed");
-            assert!(s.success())
-        }
-        rt.block_on(spawn());
-        std::fs::remove_file("/tmp/jo").unwrap();
-    }
-    #[test]
-    fn no_vals() {
-        //extern crate pretty_env_logger;
-        //pretty_env_logger::init();
-        use tokio::net::TcpListener;
-        // Create the runtime
-        let rt = Builder::new_current_thread().enable_all().build().unwrap();
-        async fn mock_app(app_listener: TcpListener) {
-            let (mut app_socket, _) = app_listener.accept().await.unwrap();
-            let mut buf = BytesMut::with_capacity(4096);
-            info!("accepted");
-
-            //app_socket.read_buf(&mut buf).await.unwrap();
-            if let Err(e) = app_socket.read_buf(&mut buf).await {
-                info!("{}", e);
-                panic!("could not read");
-            }
-
-            let mut buf = buf.freeze();
-            trace!("app read {:?}", buf);
-            let rec = Record::read(&mut buf).unwrap(); //val stream
-            assert_eq!(rec.get_request_id(), 0);
-            let v = match rec.body {
-                Body::GetValues(v) => v,
-                _ => panic!("wrong body"),
-            };
-            let names = Vec::from_iter(v.drain());
-            assert_eq!(names.len(), 3);
-
-            let _ = Record::read(&mut buf).unwrap(); //val stream end
-
-            assert!(!buf.has_remaining());
-
-            trace!("app answers on get");
-            let from_php =
-                b"\x01\x0a\0\0\0!\x07\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\0MAX_CONNS\0\0\0\0\0\0\0";
-            app_socket
-                .write_buf(&mut Bytes::from(&from_php[..]))
-                .await
-                .unwrap();
-        }
-
-        async fn con() {
-            let (app_listener, a) = local_socket_pair().await.unwrap();
-            info!("bound");
-            let m = tokio::spawn(async move {
-                let a = a.into();
-                let cp = ConPool::new(&a).await.unwrap();
-                assert_eq!(cp.max_cons, 1);
-                assert_eq!(cp.max_req_per_con, 1);
-            });
-            mock_app(app_listener).await;
-            m.await.unwrap();
-        }
-        rt.block_on(con());
-    }
-    #[test]
-    fn mplex() {
-        init_log();
-        use tokio::net::TcpListener;
-        // Create the runtime
-        let rt = Builder::new_current_thread().enable_all().build().unwrap();
-        async fn mock_app_w2cons(app_listener: &TcpListener) {
-            let (mut app_socket, _) = app_listener.accept().await.unwrap();
-            let mut buf = BytesMut::with_capacity(4096);
-            info!("accepted");
-
-            //app_socket.read_buf(&mut buf).await.unwrap();
-            if let Err(e) = app_socket.read_buf(&mut buf).await {
-                info!("{}", e);
-                panic!("could not read");
-            }
-
-            let mut buf = buf.freeze();
-            trace!("app read {:?}", buf);
-            let rec = Record::read(&mut buf).unwrap(); //val stream
-            assert_eq!(rec.get_request_id(), 0);
-            let v = match rec.body {
-                Body::GetValues(v) => v,
-                _ => panic!("wrong body"),
-            };
-            let names = Vec::from_iter(v.drain());
-            assert_eq!(names.len(), 3);
-
-            let _ = Record::read(&mut buf).unwrap(); //val stream end
-
-            assert!(!buf.has_remaining());
-
-            trace!("app answers on get");
-            let from_php =
-                b"\x01\x0a\0\0\0\"\x06\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\x01MAX_CONNS2\0\0\0\0\0\0";
-            app_socket
-                .write_buf(&mut Bytes::from(&from_php[..]))
-                .await
-                .unwrap();
-        }
-        async fn send_empty_get(
-            cp: &ConPool,
-            uri: &str,
-        ) -> Result<Response<impl HttpBody<Data = Bytes, Error = IoError>>, IoError> {
-            let b = TestBod { l: VecDeque::new() };
-            let req = Request::get(uri).body(b).unwrap();
-            let params: HashMap<Bytes, Bytes> = HashMap::new();
-            info!("reqesting");
-            cp.forward(req, params).await
-        }
-        async fn mock_app(app_listener: &TcpListener) {
-            let (mut app_socket, _) = app_listener.accept().await.unwrap();
-            info!("accepted");
-            let mut buf = BytesMut::with_capacity(128);
-            app_socket.read_buf(&mut buf).await.unwrap();
-            trace!("app read {:?}", buf);
-            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\"\x06\0\x0c\x01QUERY_STRING1\x0e\x03REQUEST_METHODGET\x01\x04\0\x01\0\"\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
-            assert_eq!(buf[..38], Bytes::from(&to_php[..38]));
-            assert_eq!(buf[39..], Bytes::from(&to_php[39..]));
-
-            trace!("app answers on get /?{}", buf[38] as char);
-            let from_php =
-                b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
-            app_socket
-                .write_buf(&mut Bytes::from(&from_php[..]))
-                .await
-                .unwrap();
-            /*
-            buf.clear();
-            app_socket.read_buf(&mut buf).await.unwrap();
-            trace!("app read {:?}", buf);
-            let to_php2 = b"\x01\x02\0\x01\0\0\0\0";
-            assert_eq!(buf, Bytes::from(&to_php2[..]));*/
-        }
-
-        async fn con() {
-            let (app_listener, a) = local_socket_pair().await.unwrap();
-            info!("bound");
-            let m = tokio::spawn(async move {
-                let a = a.into();
-                let cp = ConPool::new(&a).await.unwrap();
-                assert_eq!(cp.max_cons, 2);
-                assert_eq!(cp.max_req_per_con, 1);
-                //TODO slow req + 2nd request
-
-                let res = send_empty_get(&cp, "/?1").await.expect("forward failed");
-                trace!("got res obj");
-                assert_eq!(res.status(), StatusCode::NOT_FOUND);
-                trace!("done");
-                /*let res = send_empty_get(&cp, "/?2").await.expect("forward failed");*/
-
-                //TODO fast req + reused connection request (slow accept in new server sock)
-            });
-            mock_app_w2cons(&app_listener).await;
-            trace!("l1 done");
-            mock_app(&app_listener).await;
-            trace!("l2 done");
-            //mock_app(&app_listener).await;
-            m.await.unwrap();
-        }
-        rt.block_on(con());
-    }
 }
