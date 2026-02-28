@@ -80,29 +80,7 @@ use inner::InnerConnection;
 mod body;
 use body::FCGIBody;
 
-/// state of the body
-enum ServerState {
-    /// the server closed STDOUT
-    Done(u16),
-    /// the server is still sending answers.
-    /// We can abort
-    Running(ServerRequestId),
-}
-impl ServerState {
-    pub fn id(&self) -> u16 {
-        match self {
-            ServerState::Done(id) => *id,
-            ServerState::Running(server_request_id) => server_request_id.id,
-        }
-    }
-    /// this is done
-    pub fn mark_done(&mut self) {
-        match core::mem::replace(self, ServerState::Done(self.id())) {
-            ServerState::Done(_) => {}
-            ServerState::Running(server_request_id) => server_request_id.mark_complete(),
-        };
-    }
-}
+
 /// Request stream
 ///
 /// Manages one request from
@@ -533,11 +511,9 @@ impl Connection {
         &self,
         transaction: ServerRequestId,
     ) -> Result<Response<impl Body<Data = Bytes, Error = IoError>>, IoError> {
-        let mut fcgibody = FCGIBody {
-            con: Arc::clone(&self.inner),
-            was_returned: false,
-            transaction: ServerState::Running(transaction),
-        };
+        let mut fcgibody = FCGIBody::new(
+            Arc::clone(&self.inner),
+            transaction);
         let mut rb = Response::builder();
         let mut rheaders = rb.headers_mut().unwrap();
         let mut status = StatusCode::OK;
@@ -558,7 +534,7 @@ impl Connection {
                     if bodydata.has_remaining() {
                         let mut mut_inner = self.inner.lock().await;
                         //was_returned prevents: request might already be done and gone
-                        mut_inner.running_requests[fcgibody.transaction.id() as usize - 1]
+                        mut_inner.running_requests[fcgibody.id() as usize - 1]
                             .buf
                             .push(bodydata);
                     }

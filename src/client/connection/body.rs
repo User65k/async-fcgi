@@ -1,4 +1,4 @@
-use super::{InnerConnection, ServerState};
+use super::{InnerConnection, ServerRequestId};
 use bytes::{Buf, Bytes};
 use http_body::{Body, Frame};
 
@@ -37,6 +37,41 @@ impl Drop for FCGIBody {
         let _ = tokio::spawn(async move {
             let _req = con.lock().await.running_requests.remove(rid as usize);
         });
+    }
+}
+/// state of the body
+enum ServerState {
+    /// the server closed STDOUT
+    Done(u16),
+    /// the server is still sending answers.
+    /// We can abort
+    Running(ServerRequestId),
+}
+impl ServerState {
+    pub fn id(&self) -> u16 {
+        match self {
+            ServerState::Done(id) => *id,
+            ServerState::Running(server_request_id) => server_request_id.id,
+        }
+    }
+    /// this is done
+    pub fn mark_done(&mut self) {
+        match core::mem::replace(self, ServerState::Done(self.id())) {
+            ServerState::Done(_) => {}
+            ServerState::Running(server_request_id) => server_request_id.mark_complete(),
+        };
+    }
+}
+impl FCGIBody {
+    pub fn new(con: Arc<Mutex<InnerConnection>>, transaction: ServerRequestId) -> FCGIBody {
+        FCGIBody {
+            con,
+            was_returned: false,
+            transaction: ServerState::Running(transaction),
+        }
+    }
+    pub fn id(&self) -> u16 {
+        self.transaction.id()
     }
 }
 
