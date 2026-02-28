@@ -1,11 +1,10 @@
-
+use async_stream_connection::Addr;
 #[cfg(unix)]
 use async_stream_connection::Listener;
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 use std::{ffi::OsStr, process::Stdio};
 use tokio::process::Command;
-use async_stream_connection::Addr;
 
 impl super::ConPool {
     /// Setup a [`Command`] to spin up a FCGI server / application

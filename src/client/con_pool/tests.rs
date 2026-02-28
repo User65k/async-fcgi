@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::client::tests::{init_log, local_socket_pair, TestBod};
 use http::StatusCode;
@@ -151,16 +150,15 @@ fn mplex() {
 
             trace!("app got get /?{} on {i}", buf[38] as char);
             match buf[38] {
-                b'1'|b'3' => assert_eq!(i, 0),
+                b'1' | b'3' => assert_eq!(i, 0),
                 b'2' => assert_eq!(i, 1),
-                _ => panic!("w00t")
+                _ => panic!("w00t"),
             }
-            
 
             let req_no = buf[38] - b'0';
-    //            if req_no==1 {
-                tokio::time::sleep(Duration::from_millis(req_no as u64*500)).await;
-    //            }
+            //            if req_no==1 {
+            tokio::time::sleep(Duration::from_millis(req_no as u64 * 500)).await;
+            //            }
 
             trace!("app answers on get /?{} on {i}", buf[38] as char);
             let mut from_php =
@@ -184,11 +182,8 @@ fn mplex() {
         info!("bound");
         let s = tokio::spawn(async move {
             mock_app_w2cons(&app_listener).await;
-            
-            let _res = tokio::join!(
-                mock_app(&app_listener, 2),
-                mock_app(&app_listener, 1)
-            );
+
+            let _res = tokio::join!(mock_app(&app_listener, 2), mock_app(&app_listener, 1));
         });
         let a = a.into();
 
@@ -201,7 +196,10 @@ fn mplex() {
             let cp1 = cp.clone();
             set.spawn_local(async move {
                 let res = send_empty_get(cp1, "/?3").await;
-                assert_eq!(res.expect("forward failed").status(), StatusCode::NON_AUTHORITATIVE_INFORMATION);
+                assert_eq!(
+                    res.expect("forward failed").status(),
+                    StatusCode::NON_AUTHORITATIVE_INFORMATION
+                );
                 3
             });
             let cp1 = cp.clone();

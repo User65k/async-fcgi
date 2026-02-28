@@ -18,7 +18,8 @@ pub(crate) enum ParseResult {
 
 pub(crate) fn parse(mut bytes: Bytes, header_map: &mut HeaderMap) -> ParseResult {
     #[allow(invalid_value)]
-    let mut headers: [httparse::Header<'_>; MAX_HEADERS] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
+    let mut headers: [httparse::Header<'_>; MAX_HEADERS] =
+        unsafe { std::mem::MaybeUninit::uninit().assume_init() };
     let buf = bytes.chunk();
 
     if let Ok(pr) = parse_headers(buf, &mut headers) {

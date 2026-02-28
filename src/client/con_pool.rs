@@ -23,9 +23,21 @@ use http::{Request, Response};
 use http_body::Body as HttpBody;
 use log::{info, trace};
 use std::{
-    fmt::{self, Display}, future::Future, io::Error as IoError, iter::IntoIterator, pin::{Pin, pin}, sync::{Arc, atomic::{AtomicUsize, Ordering}}, task::{Context, Poll}
+    fmt::{self, Display},
+    future::Future,
+    io::Error as IoError,
+    iter::IntoIterator,
+    pin::{pin, Pin},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+    task::{Context, Poll},
 };
-use tokio::{io::AsyncReadExt, sync::{Notify, RwLock}};
+use tokio::{
+    io::AsyncReadExt,
+    sync::{Notify, RwLock},
+};
 
 #[cfg(feature = "app_start")]
 mod app_start;
@@ -44,7 +56,7 @@ pub struct ConPool {
     con_pool: RwLock<Vec<Connection>>,
     /// no of new connections pending
     connecting: AtomicUsize,
-    pending: Arc<Notify>
+    pending: Arc<Notify>,
 }
 impl ConPool {
     /// Connect to a FCGI server / application with [`MultiHeaderStrategy::OnlyFirst`] & [`HeaderMultilineStrategy::Ignore`].
@@ -116,7 +128,7 @@ impl ConPool {
             max_req_per_con,
             con_pool: RwLock::new(Vec::with_capacity(max_cons as usize)),
             connecting: AtomicUsize::new(0),
-            pending: Arc::new(Notify::new())
+            pending: Arc::new(Notify::new()),
         };
         /*let con = c.new_con().await?;
         c.con_pool.write().await.push(con);*/
@@ -152,13 +164,15 @@ impl ConPool {
             let max_cons = self.max_cons as usize;
             let con_pool = self.con_pool.read().await;
             let con_pool_len = con_pool.len();
-            let nu_con = if let Ok(_) = self.connecting.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
-                if max_cons > con_pool_len + x {
-                    Some(x + 1)
-                }else{
-                    None
-                }
-            }) {
+            let nu_con = if let Ok(_) =
+                self.connecting
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |x| {
+                        if max_cons > con_pool_len + x {
+                            Some(x + 1)
+                        } else {
+                            None
+                        }
+                    }) {
                 trace!(
                     "opening additional connection #{}/{} {:?}, {}",
                     con_pool_len + 1,
@@ -175,7 +189,7 @@ impl ConPool {
                 if let Some(nu) = nu_con {
                     //just create a new one
                     nu.await.map(Raced::New)
-                }else {
+                } else {
                     //wait for someone to do something (add a connection)
                     trace!("all is use. wait for someone to finish");
                     let p = self.pending.clone();
@@ -183,16 +197,16 @@ impl ConPool {
                     //now the pool should have at least one
                     let con_pool = self.con_pool.read().await;
                     let waiting = con_pool
+                        .iter()
+                        .map(|c| Box::pin(c.prep_connection()))
+                        .collect();
+                    RaceConnections { nu_con, waiting }.await
+                }
+            } else {
+                let waiting = con_pool
                     .iter()
                     .map(|c| Box::pin(c.prep_connection()))
                     .collect();
-                    RaceConnections { nu_con, waiting }.await
-                }
-            }else{
-                let waiting = con_pool
-                .iter()
-                .map(|c| Box::pin(c.prep_connection()))
-                .collect();
                 RaceConnections { nu_con, waiting }.await
             }
         };
