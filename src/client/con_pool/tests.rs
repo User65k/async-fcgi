@@ -129,39 +129,48 @@ fn mplex() {
             .unwrap();
     }
     async fn send_empty_get(
-        cp: &ConPool,
+        cp: std::rc::Rc<ConPool>,
         uri: &str,
     ) -> Result<Response<impl HttpBody<Data = Bytes, Error = IoError>>, IoError> {
         let b = TestBod { l: VecDeque::new() };
         let req = Request::get(uri).body(b).unwrap();
         let params: HashMap<Bytes, Bytes> = HashMap::new();
-        info!("reqesting");
+        info!("reqesting {}", &uri);
         cp.forward(req, params).await
     }
     async fn mock_app(app_listener: &TcpListener, inst: u8) {
         let (mut app_socket, _) = app_listener.accept().await.unwrap();
         info!("accepted {inst}");
-        let mut buf = BytesMut::with_capacity(128);
-        app_socket.read_buf(&mut buf).await.unwrap();
-        trace!("app read {:?}", buf);
-        let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\"\x06\0\x0c\x01QUERY_STRING1\x0e\x03REQUEST_METHODGET\x01\x04\0\x01\0\"\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
-        assert_eq!(buf[..38], Bytes::from(&to_php[..38]));
-        assert_eq!(buf[39..], Bytes::from(&to_php[39..]));
+        for i in 0..inst {
+            let mut buf = BytesMut::with_capacity(128);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\"\x06\0\x0c\x01QUERY_STRING1\x0e\x03REQUEST_METHODGET\x01\x04\0\x01\0\"\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
+            assert_eq!(buf[..38], Bytes::from(&to_php[..38]));
+            assert_eq!(buf[39..], Bytes::from(&to_php[39..]));
 
-        trace!("app got get /?{}", buf[38] as char);
+            trace!("app got get /?{} on {i}", buf[38] as char);
+            match buf[38] {
+                b'1'|b'3' => assert_eq!(i, 0),
+                b'2' => assert_eq!(i, 1),
+                _ => panic!("w00t")
+            }
+            
 
-        let req_no = buf[38] - b'0';
-//            if req_no==1 {
-            tokio::time::sleep(Duration::from_millis(req_no as u64*500)).await;
-//            }
+            let req_no = buf[38] - b'0';
+    //            if req_no==1 {
+                tokio::time::sleep(Duration::from_millis(req_no as u64*500)).await;
+    //            }
 
-        trace!("app answers on get /?{}", buf[38] as char);
-        let from_php =
-            b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
-        app_socket
-            .write_buf(&mut Bytes::from(&from_php[..]))
-            .await
-            .unwrap();
+            trace!("app answers on get /?{} on {i}", buf[38] as char);
+            let mut from_php =
+                *b"\x01\x06\0\x01\0\x1b\x05\0Status: 204 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
+            from_php[18] = buf[38];
+            app_socket
+                .write_buf(&mut Bytes::from(from_php.to_vec()))
+                .await
+                .unwrap();
+        }
         /*
         buf.clear();
         app_socket.read_buf(&mut buf).await.unwrap();
@@ -173,37 +182,54 @@ fn mplex() {
     async fn con() {
         let (app_listener, a) = local_socket_pair().await.unwrap();
         info!("bound");
-        let client = tokio::spawn(async move {
-            let a = a.into();
-            let cp = ConPool::new(&a).await.unwrap();
+        let s = tokio::spawn(async move {
+            mock_app_w2cons(&app_listener).await;
+            
+            let _res = tokio::join!(
+                mock_app(&app_listener, 2),
+                mock_app(&app_listener, 1)
+            );
+        });
+        let a = a.into();
+
+        let local = tokio::task::LocalSet::new();
+        let mut set = tokio::task::JoinSet::new();
+        let client = local.run_until(async move {
+            let cp = std::rc::Rc::new(ConPool::new(&a).await.unwrap());
             assert_eq!(cp.max_cons, 2);
             assert_eq!(cp.max_req_per_con, 1);
-            //TODO slow req + 2nd request
-            tokio::select! {
-                biased;
-                res = send_empty_get(&cp, "/?1") => {
-                    assert_eq!(res.expect("forward failed").status(), StatusCode::NOT_FOUND);
-                    println!("do_stuff_async() completed first")
-                }
-                res2 = send_empty_get(&cp, "/?2") => {
-                    assert_eq!(res2.expect("forward failed").status(), StatusCode::NOT_FOUND);
-                    println!("more_async_work() completed first")
-                }
-                res3 = send_empty_get(&cp, "/?3") => {
-                    assert_eq!(res3.expect("forward failed").status(), StatusCode::NOT_FOUND);
-                    println!("more_async_work() completed first")
-                }
-            };
+            let cp1 = cp.clone();
+            set.spawn_local(async move {
+                let res = send_empty_get(cp1, "/?3").await;
+                assert_eq!(res.expect("forward failed").status(), StatusCode::NON_AUTHORITATIVE_INFORMATION);
+                3
+            });
+            let cp1 = cp.clone();
+            set.spawn_local(async move {
+                let res = send_empty_get(cp1, "/?1").await;
+                assert_eq!(res.expect("forward failed").status(), StatusCode::CREATED);
+                1
+            });
+            let cp1 = cp.clone();
+            set.spawn_local(async move {
+                let res = send_empty_get(cp1, "/?2").await;
+                assert_eq!(res.expect("forward failed").status(), StatusCode::ACCEPTED);
+                2
+            });
 
-            //TODO fast req + reused connection request (slow accept in new server sock)
+            let res = set.join_next().await.unwrap();
+            assert_eq!(res.unwrap(), 1);
+            info!("1st done");
+            assert!(set.join_next().await.unwrap().is_ok());
+            info!("2nd done");
+            assert!(set.join_next().await.unwrap().is_ok());
+            info!("3rd done");
+            assert_eq!(2, cp.con_pool.read().await.len());
         });
-        mock_app_w2cons(&app_listener).await;
-        
-        let _res = tokio::join!(
-            mock_app(&app_listener, 0),
-            mock_app(&app_listener, 2)
-        );
-        client.await.unwrap();
+
+        //TODO fast req + reused connection request (slow accept in new server sock)
+        client.await;
+        s.await.unwrap();
     }
     rt.block_on(con());
 }
