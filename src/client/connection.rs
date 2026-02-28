@@ -47,6 +47,7 @@ use http::{
 };
 use http_body::{Body, Frame};
 use slab::Slab;
+use std::fmt::Display;
 use std::marker::Unpin;
 
 use log::{debug, error, info, log_enabled, trace, warn, Level::Trace};
@@ -281,6 +282,7 @@ impl Connection {
     ) -> Result<Response<impl Body<Data = Bytes, Error = IoError>>, IoError>
     where
         B: Body + Unpin,
+        B::Error: Display,
         I: IntoIterator<Item = (P1, P2)>,
         P1: Buf,
         P2: Buf,
@@ -325,6 +327,7 @@ impl Connection {
     ) -> Result<Response<impl Body<Data = Bytes, Error = IoError>>, IoError>
     where
         B: Body + Unpin,
+        B::Error: Display,
         I: IntoIterator<Item = (P1, P2)>,
         P1: Buf,
         P2: Buf,
@@ -489,22 +492,28 @@ impl Connection {
     ) -> Result<(), IoError>
     where
         B: Body + Unpin,
+        B::Error: Display
     {
         //stream as body comes in
         while let Some(chunk) = body.data().await {
-            if let Ok(data) = chunk {
-                let s = data.remaining();
-                debug!("sent {} body bytes to app", s);
-                if s == 0 {
-                    continue;
+            match chunk {
+                Ok(data) => {
+                    let s = data.remaining();
+                    debug!("sent {} body bytes to app", s);
+                    if s == 0 {
+                        continue;
+                    }
+                    len -= s;
+                    self.inner
+                        .lock()
+                        .await
+                        .io
+                        .flush_data_chunk(data, request_id, fastcgi::RecordType::StdIn)
+                        .await?;
+                },
+                Err(e) => {
+                    return Err(IoError::other(e.to_string()))
                 }
-                len -= s;
-                self.inner
-                    .lock()
-                    .await
-                    .io
-                    .flush_data_chunk(data, request_id, fastcgi::RecordType::StdIn)
-                    .await?;
             }
         }
         //CGI1.1 4.2 -> at least content-length data
@@ -544,7 +553,7 @@ impl Connection {
         //read the headers
         let mut buf: Option<Bytes> = None;
         while let Some(rbuf) = fcgibody.data().await {
-            if let Ok(mut b) = rbuf {
+            let mut b = rbuf?;
                 if let Some(left) = buf.take() {
                     //we have old data -> concat
                     let mut c = BytesMut::with_capacity(left.len() + b.len());
@@ -585,9 +594,6 @@ impl Connection {
                         break;
                     }
                 }
-            } else {
-                error!("{:?}", rbuf);
-            }
         }
         fcgibody.was_returned = true;
         debug!("resp header parsing done");
@@ -828,6 +834,9 @@ impl Body for FCGIBody {
                         }
                         Poll::Ready(None)
                     } else {
+                        if let Poll::Ready(Some(Err(e))) = _con_stat {
+                            return Poll::Ready(Some(Err(e)));
+                        }
                         trace!("body waits");
                         //store waker
                         slab.waker = Some(cx.waker().clone());
@@ -1223,4 +1232,65 @@ mod tests {
         }
         rt.block_on(con());
     }
+    #[test]
+    fn drop_during_send_body() {
+        struct IWillFail;
+        impl Body for IWillFail {
+            type Data = Bytes;
+            type Error = IoError;
+            fn poll_frame(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context,
+            ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+                Poll::Ready(Some(Err(IoError::other("oh boy"))))
+            }
+            fn size_hint(&self) -> SizeHint {
+                let mut sh = SizeHint::default();
+                sh.set_exact(42);
+                sh
+            }
+        }
+        init_log();
+        // Create the runtime
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            //params end is followed by abort
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\x82\x06\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\0QUERY_STRING\x0e\x04REQUEST_METHODPOST\x0c\x13CONTENT_TYPEmultipart/form-data\x0e\x02CONTENT_LENGTH42\x01\x04\0\x01\0\x82\x01\x04\0\x01\0\0\0\0\x01\x02\0\x01\0\0\0\0";
+            assert_eq!(buf, Bytes::from(&to_php[..]));
+        }
+
+        async fn con() {
+            let (app_listener, a) = local_socket_pair().await.unwrap();
+            let m = tokio::spawn(mock_app(app_listener));
+
+            let fcgi_con = Connection::connect(&a, 1).await.unwrap();
+            trace!("new connection obj");
+            let req = Request::post("/test")
+                .header("Content-Length", "42")
+                .header("Content-Type", "multipart/form-data")
+                .body(IWillFail)
+                .unwrap();
+            trace!("new req obj");
+            let mut params = HashMap::new();
+            params.insert(
+                &b"SCRIPT_FILENAME"[..],
+                &b"/home/daniel/Public/test.php"[..],
+            );
+            let mut res = fcgi_con.forward(req, params).await;
+            trace!("got res obj");
+            let Err(res) = res else {
+                assert_eq!(1,2);
+                return;
+            };
+            assert_eq!(res.kind(), std::io::ErrorKind::Other);
+            m.await.unwrap();
+        }
+        rt.block_on(con());
+    }
+    //TODO: test drop ret body
+    //TODO: test drop after initial forward().poll()
 }
