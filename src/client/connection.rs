@@ -1233,7 +1233,7 @@ mod tests {
         rt.block_on(con());
     }
     #[test]
-    fn drop_during_send_body() {
+    fn drop_or_fail_during_send_body() {
         struct IWillFail;
         impl Body for IWillFail {
             type Data = Bytes;
@@ -1259,7 +1259,7 @@ mod tests {
             app_socket.read_buf(&mut buf).await.unwrap();
             trace!("app read {:?}", buf);
             //params end is followed by abort
-            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\x82\x06\0\x0f\x1cSCRIPT_FILENAME/home/daniel/Public/test.php\x0c\0QUERY_STRING\x0e\x04REQUEST_METHODPOST\x0c\x13CONTENT_TYPEmultipart/form-data\x0e\x02CONTENT_LENGTH42\x01\x04\0\x01\0\x82\x01\x04\0\x01\0\0\0\0\x01\x02\0\x01\0\0\0\0";
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\04\x04\0\x0c\0QUERY_STRING\x0e\x04REQUEST_METHODPOST\x0e\x02CONTENT_LENGTH42\x01\x04\0\x01\x01\x04\0\x01\0\0\0\0\x01\x02\0\x01\0\0\0\0";
             assert_eq!(buf, Bytes::from(&to_php[..]));
         }
 
@@ -1269,17 +1269,12 @@ mod tests {
 
             let fcgi_con = Connection::connect(&a, 1).await.unwrap();
             trace!("new connection obj");
-            let req = Request::post("/test")
+            let req = Request::post("/")
                 .header("Content-Length", "42")
-                .header("Content-Type", "multipart/form-data")
                 .body(IWillFail)
                 .unwrap();
             trace!("new req obj");
-            let mut params = HashMap::new();
-            params.insert(
-                &b"SCRIPT_FILENAME"[..],
-                &b"/home/daniel/Public/test.php"[..],
-            );
+            let params: HashMap<Bytes, Bytes> = HashMap::new();
             let mut res = fcgi_con.forward(req, params).await;
             trace!("got res obj");
             let Err(res) = res else {
@@ -1291,6 +1286,54 @@ mod tests {
         }
         rt.block_on(con());
     }
-    //TODO: test drop ret body
+    #[test]
+    fn drop_return_body() {//dont consume entire return body
+        init_log();
+        // Create the runtime
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app(app_listener: TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0!\x07\0\x0c\0QUERY_STRING\x0e\x03REQUEST_METHODGET\x01\x04\0\x01\0!\x07\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
+            assert_eq!(buf, Bytes::from(&to_php[..]));
+            trace!("app answers on get");
+            let from_php = b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0";
+            app_socket
+                .write_buf(&mut Bytes::from(&from_php[..]))
+                .await
+                .unwrap();
+
+            buf.clear();
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            let to_php2 = b"\x01\x02\0\x01\0\0\0\0";
+            assert_eq!(buf, Bytes::from(&to_php2[..]));
+        }
+
+        async fn con() {
+            let (app_listener, a) = local_socket_pair().await.unwrap();
+            let m = tokio::spawn(mock_app(app_listener));
+
+            let fcgi_con = Connection::connect(&a, 1).await.unwrap();
+            trace!("new connection obj");
+            let b = TestBod { l: VecDeque::new() };
+            let req = Request::get("/")
+                .body(b)
+                .unwrap();
+            trace!("new req obj");
+            let params: HashMap<Bytes, Bytes> = HashMap::new();
+            let mut res = fcgi_con.forward(req, params).await.expect("forward failed");
+            trace!("got res obj");
+            assert_eq!(res.status(), StatusCode::NOT_FOUND);
+            
+            //do not read the body
+            drop(res);
+
+            m.await.unwrap();
+        }
+        rt.block_on(con());
+    }
     //TODO: test drop after initial forward().poll()
 }
