@@ -1,5 +1,5 @@
 use super::*;
-use crate::client::tests::local_socket_pair;
+use crate::client::tests::{local_socket_pair, init_log, TestBod};
 use http_body::{Frame, SizeHint};
 use std::collections::{HashMap, VecDeque};
 use tokio::{
@@ -8,37 +8,6 @@ use tokio::{
     runtime::Builder,
 };
 
-struct TestBod {
-    l: VecDeque<Bytes>,
-}
-impl Body for TestBod {
-    type Data = Bytes;
-    type Error = IoError;
-    fn poll_frame(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context,
-    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let Self { ref mut l } = *self;
-        match l.pop_front() {
-            None => Poll::Ready(None),
-            Some(i) => Poll::Ready(Some(Ok(Frame::data(i)))),
-        }
-    }
-    fn size_hint(&self) -> SizeHint {
-        let mut sh = SizeHint::default();
-        let s: usize = self.l.iter().map(|b| b.remaining()).sum();
-        sh.set_exact(s as u64);
-        sh
-    }
-}
-fn init_log() {
-    let mut builder = pretty_env_logger::formatted_timed_builder();
-    builder.is_test(true);
-    if let Ok(s) = ::std::env::var("RUST_LOG") {
-        builder.parse_filters(&s);
-    }
-    let _ = builder.try_init();
-}
 
 #[test]
 fn simple_get() {
@@ -100,6 +69,12 @@ fn simple_get() {
     }
     rt.block_on(con());
 }
+async fn send_empty_get(cp: &Connection) -> Result<Response<impl http_body::Body<Data = Bytes, Error = IoError>>, IoError> {
+    let b = TestBod { l: VecDeque::new() };
+    let req = Request::get("/").body(b).unwrap();
+    let params: HashMap<Bytes, Bytes> = HashMap::new();
+    cp.forward(req, params).await
+}
 #[test]
 fn app_answer_split_mid_record() {
     //flup did this once
@@ -125,11 +100,7 @@ fn app_answer_split_mid_record() {
 
         let fcgi_con = Connection::connect(&a, 1).await.unwrap();
         trace!("new connection obj");
-        let b = TestBod { l: VecDeque::new() };
-        let req = Request::get("/").body(b).unwrap();
-        trace!("new req obj");
-        let params: HashMap<Bytes, Bytes> = HashMap::new();
-        let mut res = fcgi_con.forward(req, params).await.expect("forward failed");
+        let mut res = send_empty_get(&fcgi_con).await.expect("forward failed");
         trace!("got res obj");
         let read1 = res.data().await;
         assert!(read1.is_some());
@@ -173,11 +144,7 @@ fn app_http_headers_split() {
 
         let fcgi_con = Connection::connect(&a, 1).await.unwrap();
         trace!("new connection obj");
-        let b = TestBod { l: VecDeque::new() };
-        let req = Request::get("/").body(b).unwrap();
-        trace!("new req obj");
-        let params: HashMap<Bytes, Bytes> = HashMap::new();
-        let mut res = fcgi_con.forward(req, params).await.expect("forward failed");
+        let mut res = send_empty_get(&fcgi_con).await.expect("forward failed");
         trace!("got res obj");
         assert_eq!(res.status(), StatusCode::OK);
         assert_eq!(
@@ -304,7 +271,7 @@ fn drop_or_fail_during_send_body() {
         type Data = Bytes;
         type Error = IoError;
         fn poll_frame(
-            mut self: Pin<&mut Self>,
+            self: Pin<&mut Self>,
             _cx: &mut Context,
         ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
             Poll::Ready(Some(Err(IoError::other("oh boy"))))
@@ -340,7 +307,7 @@ fn drop_or_fail_during_send_body() {
             .unwrap();
         trace!("new req obj");
         let params: HashMap<Bytes, Bytes> = HashMap::new();
-        let mut res = fcgi_con.forward(req, params).await;
+        let res = fcgi_con.forward(req, params).await;
         trace!("got res obj");
         let Err(res) = res else {
             assert_eq!(1, 2);
@@ -385,11 +352,7 @@ fn drop_return_body() {
 
         let fcgi_con = Connection::connect(&a, 1).await.unwrap();
         trace!("new connection obj");
-        let b = TestBod { l: VecDeque::new() };
-        let req = Request::get("/").body(b).unwrap();
-        trace!("new req obj");
-        let params: HashMap<Bytes, Bytes> = HashMap::new();
-        let mut res = fcgi_con.forward(req, params).await.expect("forward failed");
+        let res = send_empty_get(&fcgi_con).await.expect("forward failed");
         trace!("got res obj");
         assert_eq!(res.status(), StatusCode::NOT_FOUND);
 
@@ -446,7 +409,7 @@ fn drop_request_instantly() {
     impl<F: Future> Future for PollOnce<F> {
         type Output = Option<F::Output>;
 
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             match unsafe { Pin::new_unchecked(&mut self.get_unchecked_mut().0) }.poll(cx) {
                 Poll::Ready(r) => Poll::Ready(Some(r)),
                 Poll::Pending => Poll::Ready(None),
@@ -455,3 +418,4 @@ fn drop_request_instantly() {
     }
     rt.block_on(con());
 }
+//TODO test multiplex

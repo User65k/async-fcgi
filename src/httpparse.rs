@@ -2,8 +2,6 @@
 // can't upgrade yet
 #![allow(deprecated)]
 
-use std::mem;
-
 use bytes::{Buf, Bytes};
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 
@@ -19,7 +17,8 @@ pub(crate) enum ParseResult {
 }
 
 pub(crate) fn parse(mut bytes: Bytes, header_map: &mut HeaderMap) -> ParseResult {
-    let mut headers: [httparse::Header<'_>; MAX_HEADERS] = unsafe { mem::uninitialized() };
+    #[allow(invalid_value)]
+    let mut headers: [httparse::Header<'_>; MAX_HEADERS] = unsafe { std::mem::MaybeUninit::uninit().assume_init() };
     let buf = bytes.chunk();
 
     if let Ok(pr) = parse_headers(buf, &mut headers) {

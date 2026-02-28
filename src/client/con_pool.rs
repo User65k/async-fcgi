@@ -156,6 +156,7 @@ impl ConPool {
             let max_cons = self.max_cons as usize;
             let con_pool = self.con_pool.read().await;
             let nu_con = if max_cons > con_pool.len() {
+                trace!("opening additional connection #{}/{}", con_pool.len()+1, max_cons);
                 Some(Box::pin(self.new_con()))
             } else {
                 None
@@ -166,20 +167,25 @@ impl ConPool {
                 .collect();
             RaceConnections { nu_con, waiting }.await
         };
-        let con_pool = self.con_pool.read().await;
-        let (con, slot) = match rc {
-            Ok(Raced::Prep((i, slot))) => (con_pool.get(i).unwrap(), slot),
+        match rc {
+            Ok(Raced::Prep((i, slot))) => {
+                trace!("using con {}", i);
+                let con_pool = self.con_pool.read().await;
+                let con = con_pool.get(i).unwrap();
+                return con.send_request(req, dyn_headers, slot).await;
+            },
             Ok(Raced::New(con)) => {
                 self.con_pool.write().await.push(con);
+                let con_pool = self.con_pool.read().await;
                 let con = con_pool.last().unwrap();
                 let slot = con.prep_connection().await?;
-                (con, slot)
+                trace!("using new con");
+                return con.send_request(req, dyn_headers, slot).await;
             }
             Err(e) => {
                 return Err(e);
             }
-        };
-        con.send_request(req, dyn_headers, slot).await
+        }
     }
 }
 impl fmt::Debug for ConPool {
@@ -330,12 +336,14 @@ impl ConPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::tests::local_socket_pair;
+    use crate::client::tests::{local_socket_pair, init_log, TestBod};
     use std::collections::HashMap;
     use std::iter::FromIterator;
     use std::process::ExitStatus;
     use tokio::io::AsyncWriteExt;
     use tokio::runtime::Builder;
+    use std::collections::VecDeque;
+    use http::StatusCode;
 
     #[cfg(feature = "app_start")]
     #[test]
@@ -411,6 +419,105 @@ mod tests {
                 assert_eq!(cp.max_req_per_con, 1);
             });
             mock_app(app_listener).await;
+            m.await.unwrap();
+        }
+        rt.block_on(con());
+    }
+    #[test]
+    fn mplex() {
+        init_log();
+        use tokio::net::TcpListener;
+        // Create the runtime
+        let rt = Builder::new_current_thread().enable_all().build().unwrap();
+        async fn mock_app_w2cons(app_listener: &TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            let mut buf = BytesMut::with_capacity(4096);
+            info!("accepted");
+
+            //app_socket.read_buf(&mut buf).await.unwrap();
+            if let Err(e) = app_socket.read_buf(&mut buf).await {
+                info!("{}", e);
+                panic!("could not read");
+            }
+
+            let mut buf = buf.freeze();
+            trace!("app read {:?}", buf);
+            let rec = Record::read(&mut buf).unwrap(); //val stream
+            assert_eq!(rec.get_request_id(), 0);
+            let v = match rec.body {
+                Body::GetValues(v) => v,
+                _ => panic!("wrong body"),
+            };
+            let names = Vec::from_iter(v.drain());
+            assert_eq!(names.len(), 3);
+
+            let _ = Record::read(&mut buf).unwrap(); //val stream end
+
+            assert!(!buf.has_remaining());
+
+            trace!("app answers on get");
+            let from_php =
+                b"\x01\x0a\0\0\0\"\x06\0\n\0MPXS_CONNS\x08\0MAX_REQS\t\x01MAX_CONNS2\0\0\0\0\0\0";
+            app_socket
+                .write_buf(&mut Bytes::from(&from_php[..]))
+                .await
+                .unwrap();
+        }
+        async fn send_empty_get(cp: &ConPool, uri: &str) -> Result<Response<impl HttpBody<Data = Bytes, Error = IoError>>, IoError> {
+            let b = TestBod { l: VecDeque::new() };
+            let req = Request::get(uri).body(b).unwrap();
+            let params: HashMap<Bytes, Bytes> = HashMap::new();
+            info!("reqesting");
+            cp.forward(req, params).await
+        }
+        async fn mock_app(app_listener: &TcpListener) {
+            let (mut app_socket, _) = app_listener.accept().await.unwrap();
+            info!("accepted");
+            let mut buf = BytesMut::with_capacity(128);
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            let to_php = b"\x01\x01\0\x01\0\x08\0\0\0\x01\x01\0\0\0\0\0\x01\x04\0\x01\0\"\x06\0\x0c\x01QUERY_STRING1\x0e\x03REQUEST_METHODGET\x01\x04\0\x01\0\"\x01\x04\0\x01\0\0\0\0\x01\x05\0\x01\0\0\0\0";
+            assert_eq!(buf[..38], Bytes::from(&to_php[..38]));
+            assert_eq!(buf[39..], Bytes::from(&to_php[39..]));
+
+            trace!("app answers on get /?{}", buf[38] as char);
+            let from_php =
+                b"\x01\x06\0\x01\0\x1b\x05\0Status: 404 Not Found\r\n\r\n\r\n\x01\x06\0\x01\0\x01\x03\0\x01\0\x08\0\0\0\0\0\0\0\0\0\0";
+            app_socket
+                .write_buf(&mut Bytes::from(&from_php[..]))
+                .await
+                .unwrap();
+
+            buf.clear();
+            app_socket.read_buf(&mut buf).await.unwrap();
+            trace!("app read {:?}", buf);
+            let to_php2 = b"\x01\x02\0\x01\0\0\0\0";
+            assert_eq!(buf, Bytes::from(&to_php2[..]));
+        }
+
+        async fn con() {
+            let (app_listener, a) = local_socket_pair().await.unwrap();
+            info!("bound");
+            let m = tokio::spawn(async move {
+                let a = a.into();
+                let cp = ConPool::new(&a).await.unwrap();
+                assert_eq!(cp.max_cons, 2);
+                assert_eq!(cp.max_req_per_con, 1);
+                //TODO slow req + 2nd request
+
+                let res = send_empty_get(&cp, "/?1").await.expect("forward failed");
+                trace!("got res obj");
+                assert_eq!(res.status(), StatusCode::NOT_FOUND);
+                trace!("done");
+                /*let res = send_empty_get(&cp, "/?2").await.expect("forward failed");*/
+
+                //TODO fast req + reused connection request (slow accept in new server sock)
+            });
+            mock_app_w2cons(&app_listener).await;
+            trace!("l1 done");
+            mock_app(&app_listener).await;
+            trace!("l2 done");
+            //mock_app(&app_listener).await;
             m.await.unwrap();
         }
         rt.block_on(con());
