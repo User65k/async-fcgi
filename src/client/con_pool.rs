@@ -289,7 +289,7 @@ impl ConPool {
     /// # use std::collections::HashMap;
     /// # use std::error::Error;
     /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() -> Result<(),IoError> {
+    /// # async fn main() -> Result<(),Box<dyn Error>> {
     /// let mut env = HashMap::new();
     /// env.insert("PHP_FCGI_CHILDREN", "16");
     /// env.insert("PHP_FCGI_MAX_REQUESTS", "10000");
@@ -398,9 +398,6 @@ mod tests {
                 .write_buf(&mut Bytes::from(&from_php[..]))
                 .await
                 .unwrap();
-
-            let _ = app_listener.accept().await.unwrap();
-            info!("accepted2");
         }
 
         async fn con() {

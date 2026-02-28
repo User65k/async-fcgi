@@ -16,7 +16,7 @@ use bytes::Bytes;
 use async_fcgi::client::connection::Connection;
 
 # #[tokio::main(flavor = "current_thread")]
-# async fn main() -> Result<(),IoError> {
+# async fn main() -> Result<(),Box<dyn Error>> {
 #    let sa: SocketAddr = "127.0.0.1:59000".parse()?;
 #    let app_listener = TcpListener::bind(sa).await?;
 #    tokio::spawn(async move {
@@ -215,7 +215,7 @@ impl Connection {
     /// # use http::Request;
     /// # use async_fcgi::client::connection::Connection;
     /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() -> Result<(),IoError> {
+    /// # async fn main() -> Result<(),Box<dyn Error>> {
     /// # let mut fcgi_con = Connection::connect(&"127.0.0.1:59000".parse()?, 1).await?;
     /// let req = Request::get("/test?lol=1").header("Accept", "text/html").body(String::new())?;
     /// let mut params = [(
