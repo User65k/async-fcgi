@@ -1,7 +1,7 @@
 use super::*;
 use crate::client::tests::{init_log, local_socket_pair, TestBod};
 use http_body::{Frame, SizeHint};
-use std::collections::{HashMap, VecDeque};
+use std::{collections::{HashMap, VecDeque}, time::Duration};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -26,6 +26,11 @@ fn simple_get() {
             .write_buf(&mut Bytes::from(&from_php[..]))
             .await
             .unwrap();
+
+        //ensure nothing else is sent (like a abort_req)
+        buf.clear();
+        tokio::time::timeout(Duration::from_secs(1), app_socket.read_buf(&mut buf))
+        .await.unwrap_err();
     }
 
     async fn con() {
@@ -185,6 +190,11 @@ fn simple_post() {
             .write_buf(&mut Bytes::from(&from_php[..]))
             .await
             .unwrap();
+
+        //ensure nothing else is sent (like a abort_req)
+        buf.clear();
+        tokio::time::timeout(Duration::from_secs(1), app_socket.read_buf(&mut buf))
+        .await.unwrap_err();
     }
 
     async fn con() {
@@ -243,6 +253,11 @@ fn long_header() {
             .write_buf(&mut Bytes::from(&from_php[..]))
             .await
             .unwrap();
+
+        //ensure nothing else is sent (like a abort_req)
+        buf.clear();
+        tokio::time::timeout(Duration::from_secs(1), app_socket.read_buf(&mut buf))
+        .await.unwrap_err();
     }
 
     async fn con() {
