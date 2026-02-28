@@ -27,8 +27,8 @@ Tested with:
 - [x] Start an FCGI server (exec + env)
 - [x] Support Key-Value Pairs bigger than maximum record size
 - [x] "Full Duplex" connection to the FCGI Server/App (e.g stream STDIN and OUT at the same time)
-- [ ] `con_pool` should handle more than one connection :sweat_smile: and load balance
-- [ ] A dropped `FCGIBody` should not block a RequestID and cancel the request
+- [x] `con_pool` should handle more than one connection :sweat_smile: and load balance
+- [x] A dropped `FCGIBody` should not block a RequestID and cancel the request
 - [ ] `Connection` should handle overload error from FCGI app
 - [ ] Parsing for FCGI application/server side
 

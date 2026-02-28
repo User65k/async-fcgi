@@ -14,7 +14,10 @@ use crate::bufvec::BufList;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 #[cfg(feature = "web_server")]
 use log::{debug, trace};
-use std::{iter::{Extend, FromIterator, IntoIterator}, fmt::Display};
+use std::{
+    fmt::Display,
+    iter::{Extend, FromIterator, IntoIterator},
+};
 
 /// FCGI record header
 #[derive(Debug, Clone)]
@@ -177,8 +180,8 @@ pub enum FastCGIRole {
     /// emulated CGI/1.1 program
     Responder = 1,
     /// authorized/unauthorized decision
-    Authorizer = 2,    
-    Filter = 3
+    Authorizer = 2,
+    Filter = 3,
 }
 /// protocol_status component of EndRequestBody
 #[repr(u8)]
@@ -215,19 +218,19 @@ impl Display for ProtoStatus {
     }
 }
 /// The maximum number of concurrent transport connections this application will accept
-/// 
+///
 /// e.g. "1" or "10".
 /// Used with GET_VALUES / GET_VALUES_RESULT records.
 pub const MAX_CONNS: &[u8] = b"MAX_CONNS";
 
 /// The maximum number of concurrent requests this application will accept
-/// 
+///
 /// e.g. "1" or "50".
 /// Used with GET_VALUES / GET_VALUES_RESULT records.
 pub const MAX_REQS: &[u8] = b"MAX_REQS";
 
 /// If this application do multiplex connections
-/// 
+///
 /// i.e. handle concurrent requests over each connection ("1": Yes, "0": No).
 /// Used with GET_VALUES / GET_VALUES_RESULT records.
 pub const MPXS_CONNS: &[u8] = b"MPXS_CONNS";
@@ -691,7 +694,9 @@ fn encode_simple_get() {
     ))
     .expect("record full");
     nv.to_record(RecordType::Params, 1).append(&mut b);
-    NVBody::new().to_record(RecordType::Params, 1).append(&mut b);
+    NVBody::new()
+        .to_record(RecordType::Params, 1)
+        .append(&mut b);
 
     let mut dst = [0; 80];
     b.copy_to_slice(&mut dst);
@@ -713,7 +718,9 @@ fn encode_post() {
     ))
     .expect("record full");
     nv.to_record(RecordType::Params, 1).append(&mut b);
-    NVBody::new().to_record(RecordType::Params, 1).append(&mut b);
+    NVBody::new()
+        .to_record(RecordType::Params, 1)
+        .append(&mut b);
     STDINBody::new(1, &mut Bytes::from(&b"a=b"[..])).append(&mut b);
     STDINBody::new(1, &mut Bytes::new()).append(&mut b);
 
@@ -744,13 +751,15 @@ fn encode_long_param() {
     ))
     .expect("record full");
     nv.to_record(RecordType::Params, 1).append(&mut b);
-    NVBody::new().to_record(RecordType::Params, 1).append(&mut b);
+    NVBody::new()
+        .to_record(RecordType::Params, 1)
+        .append(&mut b);
 
     let mut dst = [0; 184];
     b.copy_to_slice(&mut dst);
 
     //padding is uninit
-    dst[175]=1;
+    dst[175] = 1;
 
     let expected = b"\x01\x01\0\x01\0\x08\0\0\0\x01\0\0\0\0\0\0\x01\x04\0\x01\0\x97\x01\0\x0b\x80\0\0\x87HTTP_ACCEPTtext/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7\x01\x01\x04\0\x01\0\0\0\0";
 

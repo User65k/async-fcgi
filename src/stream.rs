@@ -2,6 +2,8 @@
  *
  *
  */
-#[deprecated(since = "0.4.1",
-    note="Use the crate async_stream_connection instead")]
+#[deprecated(
+    since = "0.4.1",
+    note = "Use the crate async_stream_connection instead"
+)]
 pub use async_stream_connection::{Addr as FCGIAddr, Listener, Stream};

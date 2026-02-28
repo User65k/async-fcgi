@@ -19,22 +19,21 @@ use http::Response;
 use http_body::Body as HTTPBody;
 use hyper::service::service_fn;
 use hyper::Request;
-use log::error;
-use tokio::net::TcpListener;
-use std::collections::HashMap;
-use std::io::Error as IoError;
-use std::sync::Arc;
-use tokio::{runtime::Builder, sync::Mutex};
 use hyper_util::{
     rt::{TokioExecutor, TokioIo},
     server::conn::auto,
 };
+use log::error;
+use std::collections::HashMap;
+use std::io::Error as IoError;
+use std::sync::Arc;
+use tokio::net::TcpListener;
+use tokio::{runtime::Builder, sync::Mutex};
 
 async fn fwd_to_fcgi(
     fcgi_app: Arc<Mutex<ConPool>>,
     req: Request<hyper::body::Incoming>,
-)
--> Result<Response<impl HTTPBody<Data = Bytes, Error = IoError>>, IoError> {
+) -> Result<Response<impl HTTPBody<Data = Bytes, Error = IoError>>, IoError> {
     let fcg = fcgi_app.lock().await;
 
     let mut file_path = BytesMut::from(&b"."[..]);
@@ -75,8 +74,8 @@ async fn amain() {
                 Ok(l) => l,
                 Err(e) => {
                     error!("{}", e);
-                    return
-                },
+                    return;
+                }
             };
             println!("Listening on http://{}", in_addr);
             while let Ok((stream, _)) = listener.accept().await {
@@ -85,9 +84,11 @@ async fn amain() {
                 let make_service = service_fn(move |req: Request<hyper::body::Incoming>| {
                     fwd_to_fcgi(fcgi.clone(), req)
                 });
-        
+
                 tokio::task::spawn(async move {
-                    if let Err(err) = auto::Builder::new(TokioExecutor::new()).serve_connection(io, make_service).await
+                    if let Err(err) = auto::Builder::new(TokioExecutor::new())
+                        .serve_connection(io, make_service)
+                        .await
                     {
                         println!("Error serving connection: {:?}", err);
                     }

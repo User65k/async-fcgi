@@ -4,7 +4,7 @@ use std::task::{Context, Poll};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::fastcgi::{Header, NameValuePair, Record, FastCGIRole, RecordType};
+use crate::fastcgi::{FastCGIRole, Header, NameValuePair, Record, RecordType};
 #[cfg(feature = "web_server")]
 use http_body::Body;
 use log::trace;
@@ -133,13 +133,16 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
                 self.encode_kvp(request_id, RecordType::Params, p).await?;
             }
             FCGIType::STDIN { request_id, data } => {
-                self.encode_data(request_id, RecordType::StdIn, data).await?;
+                self.encode_data(request_id, RecordType::StdIn, data)
+                    .await?;
             }
             FCGIType::STDOUT { request_id, data } => {
-                self.encode_data(request_id, RecordType::StdOut, data).await?;
+                self.encode_data(request_id, RecordType::StdOut, data)
+                    .await?;
             }
             FCGIType::STDERR { request_id, data } => {
-                self.encode_data(request_id, RecordType::StdErr, data).await?;
+                self.encode_data(request_id, RecordType::StdErr, data)
+                    .await?;
             }
             FCGIType::DATA { request_id, data } => {
                 self.encode_data(request_id, RecordType::Data, data).await?;
@@ -332,7 +335,7 @@ impl<W: AsyncWrite + Unpin> FCGIWriter<W> {
     /// }
     /// ```
     /// See `encode_kvp`
-    pub fn kv_stream(&mut self, request_id: u16, rtype: RecordType) -> NameValuePairWriter<W> {
+    pub fn kv_stream(&mut self, request_id: u16, rtype: RecordType) -> NameValuePairWriter<'_, W> {
         let mut buf = BytesMut::with_capacity(BUF_LEN);
         unsafe {
             buf.set_len(Header::HEADER_LEN);
