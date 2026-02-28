@@ -11,7 +11,7 @@
 [`Connection`]: ../connection/index.html
 */
 
-use crate::client::connection::{Connection, MultiHeaderStrategy, HeaderMultilineStrategy};
+use crate::client::connection::{Connection, MultiHeaderStrategy, HeaderMultilineStrategy, PreparedConnection};
 use crate::codec::FCGIWriter;
 use crate::fastcgi::{Body, Record, MAX_CONNS, MAX_REQS, MPXS_CONNS, RecordType};
 use async_stream_connection::{Addr, Stream};
@@ -19,11 +19,14 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http::{Request, Response};
 use http_body::Body as HttpBody;
 use log::{info, trace};
-use std::error::Error;
-use std::fmt;
+use std::fmt::{self, Display};
 use std::io::Error as IoError;
 use std::iter::IntoIterator;
 use tokio::io::AsyncReadExt;
+use std::future::Future;
+use std::pin::{Pin, pin};
+use std::task::{Context, Poll};
+use tokio::sync::RwLock;
 
 #[cfg(all(unix, feature = "app_start"))]
 use async_stream_connection::Listener;
@@ -38,19 +41,20 @@ use tokio::process::Command;
 
 /// manage a pool of [`Connection`]s to an Server.
 pub struct ConPool {
-    /*
-    sock_addr: String,*/
+    sock_addr: Addr,
+    header_mul: MultiHeaderStrategy,
+    header_nl: HeaderMultilineStrategy,
     max_cons: u8,
     /// The maximum number of concurrent transport connections this application will accept
     max_req_per_con: u16,
     /// The maximum number of concurrent requests this application will accept
-    con_pool: Connection,
+    con_pool: RwLock<Vec<Connection>>,
 }
 impl ConPool {
     /// Connect to a FCGI server / application with [`MultiHeaderStrategy::OnlyFirst`] & [`HeaderMultilineStrategy::Ignore`].
     /// See [`ConPool::new_with_strategy`]
     #[inline]
-    pub async fn new(sock_addr: &Addr) -> Result<ConPool, Box<dyn Error>> {
+    pub async fn new(sock_addr: &Addr) -> Result<ConPool, IoError> {
         Self::new_with_strategy(
             sock_addr,
             MultiHeaderStrategy::OnlyFirst,
@@ -68,7 +72,7 @@ impl ConPool {
         sock_addr: &Addr,
         header_mul: MultiHeaderStrategy,
         header_nl: HeaderMultilineStrategy,
-    ) -> Result<ConPool, Box<dyn Error>> {
+    ) -> Result<ConPool, IoError> {
         // query VALUES from connection
         let stream = Stream::connect(sock_addr).await?;
         let mut stream = FCGIWriter::new(stream);
@@ -108,20 +112,26 @@ impl ConPool {
             "App supports {} connections with {} requests",
             max_cons, max_req_per_con
         );
-        let c = Connection::connect_with_strategy(
-            &sock_addr,
-            max_req_per_con,
+        let mut c = ConPool {
+            sock_addr: sock_addr.clone(),
             header_mul,
-            header_nl
-        ).await?;
-
-        Ok(ConPool {
-            /*
-            sock_addr,*/
+            header_nl,
             max_cons,
             max_req_per_con,
-            con_pool: c,
-        })
+            con_pool: RwLock::new(Vec::with_capacity(max_cons as usize)),
+        };
+        /*let con = c.new_con().await?;
+        c.con_pool.write().await.push(con);*/
+        Ok(c)
+    }
+    /// Create a new connection to the App via [`Connection::connect_with_strategy`]
+    async fn new_con(&self) -> Result<Connection, IoError> {
+        Connection::connect_with_strategy(
+            &self.sock_addr,
+            self.max_req_per_con,
+            self.header_mul,
+            self.header_nl
+        ).await
     }
     /// Forwards an HTTP request to a FGCI Application.
     /// Calls [`Connection::forward`] on an available connection.
@@ -132,11 +142,43 @@ impl ConPool {
     ) -> Result<Response<impl HttpBody<Data = Bytes, Error = IoError>>, IoError>
     where
         B: HttpBody + Unpin,
+        B::Error: Display,
         I: IntoIterator<Item = (P1, P2)>,
         P1: Buf,
         P2: Buf,
     {
-        self.con_pool.forward(req, dyn_headers).await
+        //race self.con_pool.prep_connection().await and Connection::connect_with_strategy
+
+        let rc = {
+            let max_cons = self.max_cons as usize;
+            let con_pool = self.con_pool.read().await;
+            let nu_con = if max_cons > con_pool.len() {
+                Some(Box::pin(self.new_con()))
+            }else{
+                None
+            };
+            let waiting = con_pool.iter().map(|c|Box::pin(c.prep_connection())).collect();
+            RaceConnections {
+                nu_con,
+                waiting,
+            }.await
+        };
+        let con_pool = self.con_pool.read().await;
+        let (con, slot) = match rc {
+            Ok(Raced::Prep((i, slot))) => {
+                (con_pool.get(i).unwrap(), slot)
+            },
+            Ok(Raced::New(con)) => {
+                self.con_pool.write().await.push(con);
+                let con = con_pool.last().unwrap();
+                let slot = con.prep_connection().await?;
+                (con, slot)
+            }
+            Err(e) => {
+                return Err(e);
+            }
+        };
+        con.send_request(req, dyn_headers, slot).await
     }
 }
 impl fmt::Debug for ConPool {
@@ -155,6 +197,63 @@ fn parse_int<I: std::str::FromStr>(bytes: Bytes) -> Option<I> {
         }
     }
     return None;
+}
+enum Raced {
+    Prep((usize, PreparedConnection)),
+    New(Connection)
+}
+struct RaceConnections<FutNew, FutWait>
+where 
+    FutNew: Future<Output=Result<Connection, IoError>>,
+    FutWait: Future<Output=Result<PreparedConnection, IoError>>
+{
+    nu_con: Option<Pin<Box<FutNew>>>,
+    waiting: Vec<Pin<Box<FutWait>>>
+}
+impl<FutNew, FutWait> Future for RaceConnections<FutNew, FutWait>
+where 
+    FutNew: Future<Output=Result<Connection, IoError>>,
+    FutWait: Future<Output=Result<PreparedConnection, IoError>>
+{
+    type Output = Result<Raced, IoError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut last_err = None;
+        if let Some(fut) = self.as_mut().nu_con.as_mut() {
+            let fut = pin!(fut);
+            match fut.poll(cx) {
+                Poll::Ready(Err(e)) => {
+                    log::error!("Error when connecting: {}", &e);
+                    last_err = Some(e);
+                    self.as_mut().nu_con = None;
+                    cx.waker().wake_by_ref();
+                },
+                Poll::Ready(Ok(con)) => {
+                    return Poll::Ready(Ok(Raced::New(con)));
+                },
+                Poll::Pending => {},
+            }
+        }
+        for (x, pc) in self.as_mut().waiting.iter_mut().enumerate() {
+            let pc = pin!(pc);
+            match pc.poll(cx) {
+                Poll::Ready(Err(e)) => {
+                    log::error!("Error when preping: {}", &e);
+                    last_err = Some(e);
+                    cx.waker().wake_by_ref();
+                },
+                Poll::Ready(Ok(con)) => {
+                    return Poll::Ready(Ok(Raced::Prep((x,con))));
+                },
+                Poll::Pending => {},
+            }
+        }
+        if let Some(e) = last_err.take() {
+            Poll::Ready(Err(e))
+        }else{
+            Poll::Pending
+        }
+    }    
 }
 
 /// Note: only use this if there are no requests pending
@@ -190,7 +289,7 @@ impl ConPool {
     /// # use std::collections::HashMap;
     /// # use std::error::Error;
     /// # #[tokio::main(flavor = "current_thread")]
-    /// # async fn main() -> Result<(),Box<dyn Error>> {
+    /// # async fn main() -> Result<(),IoError> {
     /// let mut env = HashMap::new();
     /// env.insert("PHP_FCGI_CHILDREN", "16");
     /// env.insert("PHP_FCGI_MAX_REQUESTS", "10000");
